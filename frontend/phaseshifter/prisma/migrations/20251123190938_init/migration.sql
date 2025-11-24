@@ -1,0 +1,6 @@
+-- CreateTable
+CREATE TABLE "PathEntry" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "path" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
