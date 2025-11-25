@@ -27,8 +27,11 @@ async def receiver(ws):
     try:
         async for msg in ws:
             print("Received from client:", msg)
-            # optional echo back
-            await ws.send(json.dumps({"type": "echo", "msg": msg}))
+            if msg == "ping":
+                payload = {
+                    "msg": "pong",
+                }
+            await ws.send(json.dumps(payload))
     except websockets.exceptions.ConnectionClosed:
         pass
 

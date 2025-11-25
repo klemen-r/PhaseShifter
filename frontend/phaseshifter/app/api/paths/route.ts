@@ -9,7 +9,10 @@ export async function GET() {
     });
     return NextResponse.json(items);
   } catch (err) {
-    return NextResponse.json({ error: "Failed to load paths" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to load paths" },
+      { status: 500 },
+    );
   }
 }
 
@@ -17,16 +20,38 @@ export async function POST(req: Request) {
   try {
     const data = await req.json();
     let path = String(data?.path ?? "").trim();
-    if (!path) return NextResponse.json({ error: "Path required" }, { status: 400 });
+    if (!path)
+      return NextResponse.json({ error: "Path required" }, { status: 400 });
     // Normalize: remove leading slash but allow nested segments
     if (path.startsWith("/")) path = path.replace(/^\/+/, "");
     if (!/^[a-z0-9\-/]+$/i.test(path)) {
-      return NextResponse.json({ error: "Invalid characters in path" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid characters in path" },
+        { status: 400 },
+      );
     }
     const created = await prisma.pathEntry.create({ data: { path } });
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
-    return NextResponse.json({ error: "Failed to create path" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to create path" },
+      { status: 500 },
+    );
   }
 }
 
+export async function DELETE(req: Request) {
+  try {
+    const data = await req.json();
+    const pathId = data.patId;
+    const deleted = await prisma.pathEntry.delete({
+      where: { id: pathId },
+    });
+    return NextResponse.json(deleted, { status: 201 });
+  } catch (err) {
+    return NextResponse.json(
+      { error: "Failed to delete path" },
+      { status: 500 },
+    );
+  }
+}
