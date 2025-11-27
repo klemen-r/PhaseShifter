@@ -69,12 +69,37 @@ export default function WebSocketDebug() {
     };
 
     ws.onmessage = (event) => {
-      if (event.data === "pong" && pingSentAt.current) {
-        setLastPingMs(Date.now() - pingSentAt.current);
+      const rawData =
+        typeof event.data === "string" ? event.data : String(event.data);
+
+      // pong messages can come back as either a bare string or JSON
+      let parsed: unknown;
+      if (typeof rawData === "string") {
+        try {
+          parsed = JSON.parse(rawData);
+        } catch {
+          parsed = null;
+        }
+      }
+
+      const parsedObj =
+        parsed && typeof parsed === "object"
+          ? (parsed as { msg?: string; type?: string })
+          : null;
+
+      const isPong =
+        rawData === "pong" ||
+        parsedObj?.msg === "pong" ||
+        parsedObj?.type === "pong";
+
+      if (isPong && pingSentAt.current !== null) {
+        const delta = (performance.now() - pingSentAt.current) * 1000;
+        setLastPingMs(Math.max(0, Math.round(delta)));
         pingSentAt.current = null;
         return;
       }
-      setMessages((prev) => [event.data, ...prev]);
+
+      setMessages((prev) => [rawData, ...prev]);
     };
   }, [ip, port]);
 
@@ -116,7 +141,7 @@ export default function WebSocketDebug() {
   }, []);
   const ping = () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      pingSentAt.current = Date.now();
+      pingSentAt.current = performance.now();
       wsRef.current.send("ping");
     }
   };
@@ -337,7 +362,7 @@ export function ConnectionCard({
             >
               <Check className="h-4 w-4 text-emerald-500" />
               <span className="text-zinc-300">
-                Last ping: <span className="font-mono">{lastPingMs} ms</span>
+                Last ping: <span className="font-mono">{lastPingMs} µs</span>
               </span>
             </motion.div>
           )}
