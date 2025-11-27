@@ -1,0 +1,14 @@
+# Rust build outputs
+/target/
+/phaseshifter-core/target/
+
+# Runtime data / logs
+data/*.csv
+*.jsonl
+*.log
+stdout.json
+
+# Editor / OS / misc
+.zed/
+.DS_Store
+rustup-init.exe

@@ -1,14 +1,53 @@
-# Rust build outputs
+########################
+# Rust (backend core)
+########################
+/BACKEND/phaseshifter-core/target/
 /target/
-/phaseshifter-core/target/
+/*.rs.bk
 
-# Runtime data / logs
-data/*.csv
-*.jsonl
+########################
+# Python (scripts/tests)
+########################
+__pycache__/
+*.py[cod]
+*.egg-info
+
+########################
+# Node / Next.js (frontend)
+########################
+node_modules/
+.next/
+.out/
+dist/
+.npm
+.yarn/
+pnpm-lock.yaml
+
+########################
+# Prisma local DB
+########################
+*.db
+**/prisma/dev.db
+**/prisma/migrations/
+**/migration_lock.toml
+
+########################
+# Data / logs
+########################
 *.log
-stdout.json
+*.jsonl
+# comment this if I want datasets in git:
+# *.csv
 
-# Editor / OS / misc
-.zed/
+########################
+# OS junk
+########################
 .DS_Store
-rustup-init.exe
+Thumbs.db
+
+########################
+# Editors / IDE
+########################
+.vscode/
+.idea/
+.zed/
