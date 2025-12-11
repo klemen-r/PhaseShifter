@@ -1,7 +1,6 @@
 // Server-only Prisma helpers
 import { PrismaClient } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
-import type { PrismaClientKnownRequestError } from "@prisma/client/runtime/library";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -27,7 +26,7 @@ export const prisma = getPrisma();
 // Type guards for common Prisma error codes
 export function isPrismaKnownError(
   err: unknown,
-): err is PrismaClientKnownRequestError {
+): err is Prisma.PrismaClientKnownRequestError {
   return (
     !!err &&
     typeof err === "object" &&
@@ -40,13 +39,13 @@ export function isPrismaKnownError(
 
 export function isUniqueConstraintError(
   err: unknown,
-): err is PrismaClientKnownRequestError {
+): err is Prisma.PrismaClientKnownRequestError {
   return isPrismaKnownError(err) && err.code === "P2002";
 }
 
 export function isNotFoundError(
   err: unknown,
-): err is PrismaClientKnownRequestError {
+): err is Prisma.PrismaClientKnownRequestError {
   return isPrismaKnownError(err) && err.code === "P2025";
 }
 
@@ -64,7 +63,7 @@ export async function findOrThrow<T>(
 export async function transactional<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
-  return prisma.$transaction(async (tx: Prisma.TransactionClient) => fn(tx));
+  return prisma.$transaction(async (tx) => fn(tx));
 }
 
 // Retry helper for transient Prisma errors
