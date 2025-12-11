@@ -9,6 +9,7 @@ avoid stale data.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -66,7 +67,9 @@ def purge_logs() -> None:
             pass
 
 
-def run_core(csv_path: Path, phase_window: int, depth_days: int, timeframe: str) -> None:
+def run_core(
+    csv_path: Path, phase_window: int, depth_days: int, timeframe: str
+) -> None:
     cmd = [
         "cargo",
         "run",
@@ -87,7 +90,7 @@ def run_core(csv_path: Path, phase_window: int, depth_days: int, timeframe: str)
     subprocess.run(cmd, cwd=CORE_DIR, check=True)
 
 
-def run_show_open_nodes(ticker: str) -> str:
+def run_show_open_nodes(ticker: str) -> List[dict]:
     cmd = [
         sys.executable,
         "show_open_nodes.py",
@@ -97,35 +100,61 @@ def run_show_open_nodes(ticker: str) -> str:
         str(DATA_DIR / "phase_updates.jsonl"),
         "--symbol",
         ticker,
+        "--raw",
     ]
     result = subprocess.run(
         cmd, cwd=SCRIPTS_DIR, text=True, capture_output=True, check=True
     )
-    return result.stdout
+    return json.loads(result.stdout or "[]")
 
 
-def extract_open_nodes(stdout: str) -> str:
-    lines = stdout.splitlines()
-    start = next((idx for idx, line in enumerate(lines) if line.startswith("OPEN NODES")), None)
-    if start is None:
-        return ""
-    return "\n".join(lines[start:]).strip()
+def format_run_section(
+    timestamp: str,
+    header: str,
+    projections_by_side: dict[str, List[float]],
+) -> str:
+    lines: List[str] = [f"=== {timestamp} | {header} ==="]
+    for side in ("bullish", "bearish"):
+        values = sorted(projections_by_side.get(side, []))
+        if not values:
+            lines.append(f"{side}: none")
+        else:
+            lines.append(f"{side}:")
+            lines.extend(f"  {value:.2f}" for value in values)
+    lines.append("")
+    return "\n".join(lines)
 
 
-def write_nodes_file(sections: List[Tuple[str, str]]) -> None:
+def format_aggregate_section(timestamp: str, all_projections: List[dict]) -> str:
+    lines = ["", f"=== {timestamp} | All projections (ascending) ==="]
+    if not all_projections:
+        lines.append("none")
+    else:
+        for item in sorted(all_projections, key=lambda row: row["value"]):
+            lines.append(
+                f"{item['value']:.2f} ({item['side']}, {item['interval']}, "
+                f"phase_window={item['phase_window']}, depth_days={item['depth_days']})"
+            )
+    lines.append("")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_nodes_file(sections: List[Tuple[str, str]], aggregate: str) -> None:
     timestamp = datetime.now().isoformat(timespec="seconds")
     with NODES_OUTPUT.open("a", encoding="utf-8") as handle:
         for header, content in sections:
-            handle.write(f"=== {timestamp} | {header} ===\n")
-            handle.write(content.rstrip() or "OPEN NODES block not found.")
-            handle.write("\n\n")
+            handle.write(format_run_section(timestamp, header, content))
+        handle.write(aggregate)
 
 
 def main() -> None:
     ticker = sys.argv[1] if len(sys.argv) > 1 else "NQ=F"
     fetch_module = load_fetch_module()
 
-    sections: List[Tuple[str, str]] = []
+    sections: List[Tuple[str, dict[str, List[float]]]] = []
+    all_projections: List[dict] = []
+    timestamp = datetime.now().isoformat(timespec="seconds")
     for run in RUNS:
         interval = run["interval"]
         days = run["days"]
@@ -141,16 +170,37 @@ def main() -> None:
         run_core(csv_path, phase_window, depth_days, interval)
         print(f"[core] completed run for {interval}, phase_window={phase_window}")
 
-        stdout = run_show_open_nodes(ticker)
-        open_nodes_block = extract_open_nodes(stdout)
+        nodes = run_show_open_nodes(ticker)
+        projections_by_side: dict[str, List[float]] = {"bullish": [], "bearish": []}
+        for node in nodes:
+            value = node.get("projected_price_now")
+            side = (node.get("side") or "").lower()
+            if value is None or side not in projections_by_side:
+                continue
+            try:
+                value_num = float(value)
+            except (TypeError, ValueError):
+                continue
+            projections_by_side[side].append(value_num)
+            all_projections.append(
+                {
+                    "value": value_num,
+                    "side": side,
+                    "interval": interval,
+                    "phase_window": phase_window,
+                    "depth_days": depth_days,
+                }
+            )
+
         header = (
             f"{ticker.upper()} {interval} {days}d "
             f"phase_window={phase_window} depth_days={depth_days}"
         )
-        sections.append((header, open_nodes_block))
-        print(f"[nodes] captured OPEN NODES for {header}")
+        sections.append((header, projections_by_side))
+        print(f"[nodes] captured projected values for {header}")
 
-    write_nodes_file(sections)
+    aggregate = format_aggregate_section(timestamp, all_projections)
+    write_nodes_file(sections, aggregate)
     print(f"[done] appended results to {NODES_OUTPUT}")
 
 
