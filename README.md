@@ -1,96 +1,72 @@
 # PhaseShifter
 
-## Overview
+Rust PhaseShifter engine plus a standalone Next.js UI, living in one repo but buildable and runnable independently.
 
-This repository contains two separate subprojects that live in the same Git repo but are logically independent:
+## Repo layout
 
-- **BACKEND** – Rust-based CLI engine with supporting Python utilities and local data files.
-- **FRONTEND** – Next.js + Prisma app that provides a UI layer and uses a local SQLite database.
+```
+BACKEND/                 Rust core + data and analysis scripts
+  phaseshifter-core/     Rust crate with the PhaseShifter engine
+  data/                  Sample CSVs + helpers (download, JSONL outputs)
+  scripts/               Python utilities (e.g., show_open_nodes.py)
+FRONTEND/                UI and playgrounds
+  phaseshifter/          Next.js + Prisma app (local SQLite dev.db)
+  testsPython/           Misc. Python experiments
+run_phase_pipeline.py    Helper to fetch data, run multiple configs, append nodes.txt
+default.txt, nodes.txt   Local outputs (ignored by Git)
+```
 
-There is **no enforced integration** between them yet. You can develop and run each side on its own.
+## Prerequisites
 
----
+- Rust (stable) with `cargo`
+- Python 3.10+ for data helpers (`pip install pandas yfinance` for downloads)
+- Node.js 18+ (20+ recommended) with `npm`
 
-## BACKEND
+## Backend quickstart
 
-**Location**
-
-- Rust crate: `BACKEND/phaseshifter-core/`
-- Data files: `BACKEND/data/`
-- Python scripts: `BACKEND/scripts/`
-- Backend-specific notes: `BACKEND/README.md`
-
-**Role**
-
-- Read OHLCV or similar data from CSV files in `BACKEND/data/`.
-- Process that data using the PhaseShifter engine in `phaseshifter-core/src/`.
-- Emit JSONL outputs (e.g. `node_events.jsonl`, `phase_updates.jsonl`) that can be inspected or visualized by other tools.
-- Provide helper utilities in Python (e.g. `show_open_nodes.py`) to explore those outputs.
-
----
-
-## FRONTEND
-
-**Location**
-
-- Next.js app: `FRONTEND/phaseshifter/`
-- Python tests/playground: `FRONTEND/testsPython/`
-
-**Role**
-
-- Next.js (App Router) UI with:
-  - `app/` – pages, layout, web socket page, API route(s).
-  - `components/` – reusable UI components (sidebar, path list, theme toggle, base UI primitives).
-  - `hooks/` – custom hooks (e.g. `use-mobile` for responsive behavior).
-  - `lib/` – shared helpers and utilities.
-  - `prisma/` – Prisma schema, migrations, and local SQLite `dev.db`.
-  - `public/` – static images and SVG assets.
-- Acts as a standalone frontend that can be wired to any backend or data source later.
-
----
-
-## Development (Backend)
-
-From the repo root:
+Example run against the bundled sample data:
 
 ```bash
 cd BACKEND/phaseshifter-core
-cargo run
-Use CLI flags as defined in src/config.rs / src/main.rs to point to the desired CSV file and configure the engine.
+cargo run -- --csv ../data/nq_1h.csv --phase-window 7 --depth-days 50 --timeframe 1h \
+  --out-json ../data/phase_updates.jsonl --node-events-log ../data/node_events.jsonl
+```
 
-To inspect outputs with Python:
+- Defaults for `--csv`, `--out-json`, and `--node-events-log` already point at `../data`, so you can omit them once you’re comfortable.
+- A per-run TOML config can be supplied with `--config <path>`; CLI flags still override the file.
+- The engine writes JSONL logs to `BACKEND/data/` (git-ignored).
 
-bash
-Copy code
+Inspect open nodes from those outputs:
+
+```bash
 cd BACKEND
-python scripts/show_open_nodes.py --help
-Adjust arguments (paths, symbol, etc.) as needed.
+python scripts/show_open_nodes.py --nodes data/node_events.jsonl --phases data/phase_updates.jsonl --symbol NQ=F
+```
 
-Development (Frontend)
-From the repo root:
+Batch pipeline (fetch data via yfinance, run multiple configs, and append `nodes.txt`):
 
-bash
-Copy code
+```bash
+pip install pandas yfinance
+python run_phase_pipeline.py NQ=F
+```
+
+## Frontend quickstart (Next.js + Prisma)
+
+```bash
 cd FRONTEND/phaseshifter
 npm install
-npm run dev
-This starts the Next.js dev server (by default on http://localhost:3000).
+npm run dev         # http://localhost:3000
+npm run lint        # quick health check
+# npm run build && npm start for a production-like run
+```
 
-Prisma files live in FRONTEND/phaseshifter/prisma/:
+- Uses the local SQLite database at `prisma/dev.db`. If you change the schema, run `npx prisma migrate dev`. Use `npx prisma studio` to inspect data.
+- No backend wiring is enforced yet; the UI can be pointed at any future API.
 
-schema.prisma – data model.
+## Notes for pushing to GitHub
 
-dev.db – local SQLite dev database.
-
-migrations/ – migration history.
-
-You can manage the schema and database with:
-
-bash
-Copy code
-npx prisma migrate dev
-npx prisma studio
-Notes
-Backend and frontend are intentionally kept separate. You can decide later how (or whether) to connect them (HTTP, WebSocket, file-based, etc.).
-
-The root .gitignore is configured for Rust, Node/Next.js, Python, Prisma, and common editor/OS junk.
+- Outputs under `BACKEND/data/` and root `nodes.txt` are ignored; keep them for local exploration only.
+- Run a quick hygiene pass before pushing:
+  - `cargo fmt && cargo test` inside `BACKEND/phaseshifter-core`
+  - `npm run lint` (and optionally `npm run build`) inside `FRONTEND/phaseshifter`
+- Keep backend/frontend changes in separate commits where possible; they are maintained independently today.

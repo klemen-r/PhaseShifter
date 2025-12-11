@@ -11,17 +11,26 @@
 __pycache__/
 *.py[cod]
 *.egg-info
+.venv/
+venv/
 
 ########################
 # Node / Next.js (frontend)
 ########################
-node_modules/
-.next/
-.out/
-dist/
+**/node_modules/
+**/.next/
+**/.out/
+**/dist/
 .npm
 .yarn/
 pnpm-lock.yaml
+
+########################
+# Env files
+########################
+.env
+.env.local
+.env.*
 
 ########################
 # Prisma local DB
@@ -38,6 +47,12 @@ pnpm-lock.yaml
 *.jsonl
 # comment this if I want datasets in git:
 # *.csv
+
+########################
+# Local run artifacts
+########################
+default.txt
+nodes.txt
 
 ########################
 # OS junk
