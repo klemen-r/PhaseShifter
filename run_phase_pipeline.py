@@ -156,7 +156,7 @@ def find_clusters(
         center_val = float(median(values))
         max_width = center_val * ratio
         filtered = [
-            row for row in cluster if abs(row["value"] - center_val) <= max_width * 0.35
+            row for row in cluster if abs(row["value"] - center_val) <= max_width * 0.3
         ]
         if len(filtered) < 2:
             return []
