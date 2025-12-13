@@ -8,14 +8,16 @@ avoid stale data.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from statistics import median
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "BACKEND" / "data"
@@ -30,9 +32,8 @@ RUNS = [
     {"interval": "15m", "days": 60, "phase_window": 10, "depth_days": 60},
 ]
 
-CLUSTER_WIDTH_RATIO = 0.0006
-CORE_GAP_RATIO = 0.0002
-NEAR_ZERO_WIDTH = 1e-6
+ZERO_GAP_EPS = 1e-12
+DEFAULT_MIN_UNIQUE_SCENARIOS = 2
 
 
 def load_fetch_module():
@@ -113,19 +114,31 @@ def run_show_open_nodes(ticker: str) -> List[dict]:
     return json.loads(result.stdout or "[]")
 
 
+def format_distance(distance_pct: float | None) -> str:
+    try:
+        return f"{float(distance_pct) * 100:.2f}%"
+    except Exception:
+        return "n/a"
+
+
 def format_run_section(
     timestamp: str,
     header: str,
-    projections_by_side: dict[str, List[float]],
+    projections_by_side: dict[str, List[dict]],
 ) -> str:
     lines: List[str] = [f"=== {timestamp} | {header} ==="]
     for side in ("bullish", "bearish"):
-        values = sorted(projections_by_side.get(side, []))
-        if not values:
+        projections = sorted(
+            projections_by_side.get(side, []), key=lambda p: p["value"]
+        )
+        if not projections:
             lines.append(f"{side}: none")
         else:
             lines.append(f"{side}:")
-            lines.extend(f"  {value:.2f}" for value in values)
+            for proj in projections:
+                lines.append(
+                    f"  {proj['value']:.2f}    ({format_distance(proj.get('distance_pct'))})"
+                )
     lines.append("")
     return "\n".join(lines)
 
@@ -147,113 +160,214 @@ def format_aggregate_section(timestamp: str, all_projections: List[dict]) -> str
 
 def find_clusters(
     all_projections: List[dict],
-    ratio: float = CLUSTER_WIDTH_RATIO,
-) -> List[dict]:
-    """Identify tight price clusters per side using gap-based growth and outlier pruning."""
+    min_unique_scenarios: int = DEFAULT_MIN_UNIQUE_SCENARIOS,
+) -> Tuple[Optional[float], List[dict]]:
+    """
+    Anchor-normalized, adaptive-gap clustering for mixed-price assets.
 
-    def process_cluster(side: str, cluster: List[dict]) -> List[dict]:
-        values = [row["value"] for row in cluster]
-        center_val = float(median(values))
-        max_width = center_val * ratio
-        filtered = [
-            row for row in cluster if abs(row["value"] - center_val) <= max_width * 0.3
+    Steps:
+    1) Compute per-node implied anchor and take the median across all nodes.
+    2) Work in deviation space dev=(value-A)/A per side.
+    3) Seed groups with a percentile-based gap and refine with adaptive scales.
+    """
+
+    def safe_float(value: object) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def quantile(values: List[float], q: float) -> float:
+        if not values:
+            raise ValueError("quantile requires non-empty list")
+        if q <= 0.0:
+            return min(values)
+        if q >= 1.0:
+            return max(values)
+        sorted_vals = sorted(values)
+        pos = (len(sorted_vals) - 1) * q
+        lower = int(pos)
+        upper = min(lower + 1, len(sorted_vals) - 1)
+        if lower == upper:
+            return sorted_vals[lower]
+        fraction = pos - lower
+        return sorted_vals[lower] * (1.0 - fraction) + sorted_vals[upper] * fraction
+
+    def compute_scale(gaps: List[float]) -> float:
+        gg = [abs(g) for g in gaps if abs(g) > ZERO_GAP_EPS]
+        if not gg:
+            return 0.0
+        if len(gg) <= 3:
+            gmin = min(gg)
+            gmax = max(gg)
+            if gmin > 0 and gmax / gmin > 3.5:
+                return float(median(gg))
+            return gmin
+        q25 = quantile(gg, 0.25)
+        filtered = [g for g in gg if g <= q25]
+        base = filtered if filtered else gg
+        return float(median(base))
+
+    def compute_anchor(nodes: List[dict]) -> Optional[float]:
+        anchors: List[float] = []
+        for node in nodes:
+            value = safe_float(node.get("value"))
+            side = node.get("side")
+            pct_raw = node.get("pct_from_anchor")
+            if value is None or side not in ("bullish", "bearish") or pct_raw is None:
+                continue
+            try:
+                pct = abs(float(pct_raw)) / 100.0
+            except (TypeError, ValueError):
+                continue
+            sign = 1.0 if side == "bullish" else -1.0
+            denom = 1.0 + sign * pct
+            if abs(denom) < ZERO_GAP_EPS:
+                continue
+            anchors.append(value / denom)
+        if not anchors:
+            return None
+        return float(median(anchors))
+
+    def make_gaps(sorted_nodes: List[dict]) -> List[float]:
+        return [
+            sorted_nodes[i + 1]["dev"] - sorted_nodes[i]["dev"]
+            for i in range(len(sorted_nodes) - 1)
         ]
-        if len(filtered) < 2:
-            return []
 
-        filtered = sorted(filtered, key=lambda row: row["value"])
-        center_filtered = float(median([row["value"] for row in filtered]))
-        core_gap = center_filtered * CORE_GAP_RATIO
-        sub_clusters: List[List[dict]] = []
-        current_group: List[dict] = []
-        for row in filtered:
-            if not current_group:
-                current_group = [row]
-                continue
-            gap = row["value"] - current_group[-1]["value"]
-            if gap > core_gap:
-                sub_clusters.append(current_group)
-                current_group = [row]
-            else:
-                current_group.append(row)
-        if current_group:
-            sub_clusters.append(current_group)
+    anchor = compute_anchor(all_projections)
+    if anchor is None or abs(anchor) < ZERO_GAP_EPS:
+        return None, []
 
-        results: List[dict] = []
-        for sub in sub_clusters:
-            count = len(sub)
-            unique_intervals = len({row["interval"] for row in sub})
-            if count < 2:
-                continue
-            if unique_intervals < 2 and count < 3:
-                continue
-            sub_values = [row["value"] for row in sub]
-            low = min(sub_values)
-            high = max(sub_values)
-            center_sub = float(median(sub_values))
-            results.append(
-                {
-                    "side": side,
-                    "center": center_sub,
-                    "low": low,
-                    "high": high,
-                    "width": high - low,
-                    "count": count,
-                    "unique_intervals": unique_intervals,
-                    "projections": sub,
-                }
-            )
-        return results
+    enriched: List[dict] = []
+    for row in all_projections:
+        value = safe_float(row.get("value"))
+        if value is None:
+            continue
+        side = row.get("side")
+        if side not in ("bullish", "bearish"):
+            continue
+        dev = (value - anchor) / anchor
+        enriched.append(
+            {
+                **row,
+                "dev": dev,
+                "anchor": anchor,
+                "scenario": (row.get("interval"), row.get("phase_window")),
+            }
+        )
 
     clusters: List[dict] = []
-    grouped: dict[str, List[dict]] = {"bullish": [], "bearish": []}
-    for projection in all_projections:
-        side = projection.get("side")
-        if side in grouped:
-            grouped[side].append(projection)
+    for side in ("bullish", "bearish"):
+        side_nodes = [n for n in enriched if n["side"] == side]
+        if len(side_nodes) < 2:
+            continue
+        side_nodes.sort(key=lambda n: n["dev"])
 
-    for side, projections in grouped.items():
-        sorted_projections = sorted(projections, key=lambda row: row["value"])
-        if not sorted_projections:
+        gaps = make_gaps(side_nodes)
+        nonzero_gaps = [g for g in gaps if abs(g) > ZERO_GAP_EPS]
+        if not nonzero_gaps:
             continue
 
+        sorted_gaps = sorted(nonzero_gaps)
+        k = len(sorted_gaps)
+        start_idx = max(0, int(math.floor(k * 0.2)))
+        end_idx = max(start_idx + 1, int(math.ceil(k * 0.5)))
+        end_idx = min(end_idx, k)
+        seed_slice = sorted_gaps[start_idx:end_idx]
+        s_seed = float(median(seed_slice if seed_slice else sorted_gaps))
+        seed_gap = s_seed
+
         seeds: List[List[dict]] = []
-        for proj in sorted_projections:
-            if not seeds:
-                seeds.append([proj])
-                continue
-            current = seeds[-1]
-            current_values = [row["value"] for row in current]
-            current_center = float(median(current_values))
-            current_core_gap = current_center * CORE_GAP_RATIO
-            current_max_width = current_center * ratio
-            last_val = current_values[-1]
-            if (
-                abs(proj["value"] - last_val) <= current_core_gap
-                or abs(proj["value"] - current_center) <= current_max_width
-            ):
-                current.append(proj)
+        current_seed: List[dict] = [side_nodes[0]]
+        for i in range(1, len(side_nodes)):
+            gap = side_nodes[i]["dev"] - side_nodes[i - 1]["dev"]
+            if gap <= seed_gap:
+                current_seed.append(side_nodes[i])
             else:
-                seeds.append([proj])
+                seeds.append(current_seed)
+                current_seed = [side_nodes[i]]
+        if current_seed:
+            seeds.append(current_seed)
 
         for seed in seeds:
-            clusters.extend(process_cluster(side, seed))
+            if len(seed) < 2:
+                continue
 
-    return clusters
+            seed_gaps = make_gaps(seed)
+            s_core = compute_scale(seed_gaps)
+            center = float(median([n["dev"] for n in seed]))
+            out_cut = 2.2 * s_core
+
+            # Keep points inside the outlier cut
+            pruned = [n for n in seed if abs(n["dev"] - center) <= out_cut]
+            if len(pruned) < 2:
+                continue
+
+            pruned.sort(key=lambda n: n["dev"])
+            pruned_gaps = make_gaps(pruned)
+            s_split = compute_scale(pruned_gaps)
+            core_gap = 2.0 * s_split
+            max_width = 5.0 * s_split
+
+            subcluster: List[dict] = [pruned[0]]
+            subs: List[List[dict]] = []
+            for j in range(1, len(pruned)):
+                gap = pruned[j]["dev"] - pruned[j - 1]["dev"]
+                if gap <= core_gap:
+                    subcluster.append(pruned[j])
+                else:
+                    subs.append(subcluster)
+                    subcluster = [pruned[j]]
+            if subcluster:
+                subs.append(subcluster)
+
+            for sub in subs:
+                if len(sub) < 2:
+                    continue
+
+                scenarios = {(n.get("interval"), n.get("phase_window")) for n in sub}
+                unique_scenarios = len(scenarios)
+                if unique_scenarios < min_unique_scenarios:
+                    continue
+
+                devs = [n["dev"] for n in sub]
+                width_dev = max(devs) - min(devs)
+                if width_dev > max_width:
+                    continue
+
+                low = anchor * (1.0 + min(devs))
+                high = anchor * (1.0 + max(devs))
+                clusters.append(
+                    {
+                        "side": side,
+                        "low": low,
+                        "high": high,
+                        "width": high - low,
+                        "count": len(sub),
+                        "unique_scenarios": unique_scenarios,
+                        "projections": sub,
+                        "anchor": anchor,
+                        "center_dev": center,
+                        "width_dev": width_dev,
+                    }
+                )
+
+    return anchor, clusters
 
 
 def dedupe_overlapping_clusters(clusters: List[dict]) -> List[dict]:
-    """Keep the strongest cluster per overlapping price region, per side."""
+    """Keep the strongest cluster per overlapping price region, per side (narrowest width, then scenarios, then count)."""
 
     def better(a: dict, b: dict) -> bool:
         return (
             a["width"],
+            -a["unique_scenarios"],
             -a["count"],
-            -a["unique_intervals"],
         ) < (
             b["width"],
+            -b["unique_scenarios"],
             -b["count"],
-            -b["unique_intervals"],
         )
 
     result: List[dict] = []
@@ -287,28 +401,43 @@ def dedupe_overlapping_clusters(clusters: List[dict]) -> List[dict]:
     return sorted(result, key=lambda c: c["low"])
 
 
-def format_clusters_section(timestamp: str, clusters: List[dict]) -> str:
+def format_clusters_section(
+    timestamp: str, anchor: Optional[float], clusters: List[dict]
+) -> str:
+    anchor_display = f"{anchor:.2f}" if anchor is not None else "n/a"
     lines = [
         "",
-        f"=== {timestamp} | Experimental clusters (width <= price * {CLUSTER_WIDTH_RATIO}) ===",
+        (
+            f"=== {timestamp} | Anchor-normalized clusters "
+            f"(anchor median={anchor_display}) ==="
+        ),
     ]
     if not clusters:
         lines.append("none")
     else:
         for idx, cluster in enumerate(clusters, start=1):
-            tf_phase = sorted(
-                {
-                    (row["interval"], row["phase_window"])
-                    for row in cluster["projections"]
-                }
+            members = sorted(cluster["projections"], key=lambda r: r["value"])
+            scenario_set = sorted(
+                {(m.get("interval"), m.get("phase_window")) for m in members}
             )
-            tf_phase_str = "; ".join(
-                f"{interval} pw={phase_window}" for interval, phase_window in tf_phase
+            scenario_str = "; ".join(
+                f"{interval} pw={phase_window}"
+                for interval, phase_window in scenario_set
             )
             lines.append(
                 f"{idx}. {cluster['low']:.2f} - {cluster['high']:.2f} "
-                f"({tf_phase_str}) [{cluster['side']}]"
+                f"(w={cluster['width']:.2f}, dev_w={cluster.get('width_dev', 0):.6f}) "
+                f"[{cluster['side']}] count={cluster['count']} "
+                f"scenarios={cluster['unique_scenarios']} ({scenario_str})"
             )
+            for m in members:
+                pct = m.get("pct_from_anchor")
+                pct_display = f"{pct:.2f}%" if isinstance(pct, (int, float)) else "n/a"
+                lines.append(
+                    f"    - {m['value']:.2f} dev={m['dev']:+.6f} "
+                    f"({m.get('interval')}, pw={m.get('phase_window')}) "
+                    f"dist_from_anchor={pct_display}"
+                )
     lines.append("")
     lines.append("")
     lines.append("")
@@ -317,7 +446,7 @@ def format_clusters_section(timestamp: str, clusters: List[dict]) -> str:
 
 def write_nodes_file(
     timestamp: str,
-    sections: List[Tuple[str, dict[str, List[float]]]],
+    sections: List[Tuple[str, dict[str, List[dict]]]],
     aggregate: str,
     clusters: str,
 ) -> None:
@@ -328,11 +457,33 @@ def write_nodes_file(
         handle.write(clusters)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fetch price data, run PhaseShifter core, and cluster open nodes."
+    )
+    parser.add_argument(
+        "ticker",
+        nargs="?",
+        default="NQ=F",
+        help="Symbol/ticker to process (default: NQ=F)",
+    )
+    parser.add_argument(
+        "--allow-single-scenario",
+        action="store_true",
+        help="Disable cross-scenario validation; allow clusters with a single timeframe/phase_window.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    ticker = sys.argv[1] if len(sys.argv) > 1 else "NQ=F"
+    args = parse_args()
+    ticker = args.ticker
+    min_unique_scenarios = (
+        1 if args.allow_single_scenario else DEFAULT_MIN_UNIQUE_SCENARIOS
+    )
     fetch_module = load_fetch_module()
 
-    sections: List[Tuple[str, dict[str, List[float]]]] = []
+    sections: List[Tuple[str, dict[str, List[dict]]]] = []
     all_projections: List[dict] = []
     timestamp = datetime.now().isoformat(timespec="seconds")
     for run in RUNS:
@@ -351,7 +502,7 @@ def main() -> None:
         print(f"[core] completed run for {interval}, phase_window={phase_window}")
 
         nodes = run_show_open_nodes(ticker)
-        projections_by_side: dict[str, List[float]] = {"bullish": [], "bearish": []}
+        projections_by_side: dict[str, List[dict]] = {"bullish": [], "bearish": []}
         for node in nodes:
             value = node.get("projected_price_now")
             side = (node.get("side") or "").lower()
@@ -361,7 +512,15 @@ def main() -> None:
                 value_num = float(value)
             except (TypeError, ValueError):
                 continue
-            projections_by_side[side].append(value_num)
+            distance_pct = node.get("distance_pct")
+            pct_from_anchor: Optional[float] = None
+            try:
+                pct_from_anchor = float(distance_pct) * 100.0
+            except (TypeError, ValueError):
+                pass
+            projections_by_side[side].append(
+                {"value": value_num, "distance_pct": distance_pct}
+            )
             all_projections.append(
                 {
                     "value": value_num,
@@ -369,6 +528,7 @@ def main() -> None:
                     "interval": interval,
                     "phase_window": phase_window,
                     "depth_days": depth_days,
+                    "pct_from_anchor": pct_from_anchor,
                 }
             )
 
@@ -380,9 +540,11 @@ def main() -> None:
         print(f"[nodes] captured projected values for {header}")
 
     aggregate = format_aggregate_section(timestamp, all_projections)
-    raw_clusters = find_clusters(all_projections, CLUSTER_WIDTH_RATIO)
+    anchor, raw_clusters = find_clusters(
+        all_projections, min_unique_scenarios=min_unique_scenarios
+    )
     clusters = dedupe_overlapping_clusters(raw_clusters)
-    clusters_section = format_clusters_section(timestamp, clusters)
+    clusters_section = format_clusters_section(timestamp, anchor, clusters)
     write_nodes_file(timestamp, sections, aggregate, clusters_section)
     print(f"[done] appended results to {NODES_OUTPUT}")
 

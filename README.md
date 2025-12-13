@@ -48,7 +48,11 @@ Batch pipeline (fetch data via yfinance, run multiple configs, and append `nodes
 ```bash
 pip install pandas yfinance
 python run_phase_pipeline.py NQ=F
+# allow single-scenario clusters (skip cross-timeframe validation)
+python run_phase_pipeline.py BTC-USD --allow-single-scenario
 ```
+
+- Pipeline clusters are now anchor-normalized and adaptive-gap based: a common anchor is inferred from all nodes, deviations are clustered per side with percentile seed gaps, scale-based pruning/splitting, width limits, and overlap dedupe (prefers narrower zones, then scenario breadth, then count).
 
 ## Frontend quickstart (Next.js + Prisma)
 
