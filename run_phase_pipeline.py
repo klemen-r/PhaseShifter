@@ -24,6 +24,7 @@ DATA_DIR = ROOT_DIR / "BACKEND" / "data"
 CORE_DIR = ROOT_DIR / "BACKEND" / "phaseshifter-core"
 SCRIPTS_DIR = ROOT_DIR / "BACKEND" / "scripts"
 NODES_OUTPUT = ROOT_DIR / "nodes.txt"
+PINESCRIPT_CACHE = ROOT_DIR / "pinescript_clusters.json"
 
 RUNS = [
     {"interval": "1m", "days": 8, "phase_window": 50, "depth_days": 8},
@@ -156,6 +157,21 @@ def format_aggregate_section(timestamp: str, all_projections: List[dict]) -> str
     lines.append("")
     lines.append("")
     return "\n".join(lines)
+
+
+def load_cluster_cache() -> dict:
+    if not PINESCRIPT_CACHE.exists():
+        return {}
+    try:
+        with PINESCRIPT_CACHE.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return {}
+
+
+def persist_cluster_cache(cache: dict) -> None:
+    with PINESCRIPT_CACHE.open("w", encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=False, indent=2)
 
 
 def find_clusters(
@@ -449,12 +465,144 @@ def write_nodes_file(
     sections: List[Tuple[str, dict[str, List[dict]]]],
     aggregate: str,
     clusters: str,
+    pinescript: str,
 ) -> None:
     with NODES_OUTPUT.open("a", encoding="utf-8") as handle:
         for header, content in sections:
             handle.write(format_run_section(timestamp, header, content))
         handle.write(aggregate)
         handle.write(clusters)
+        handle.write(pinescript)
+
+
+def parse_timestamp_parts(
+    ts: Optional[str],
+) -> Optional[Tuple[int, int, int, int, int, int]]:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    return (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+
+
+def format_pinescript_indicator(cache: dict, generated_at: str) -> str:
+    zones: List[dict] = []
+    for symbol, payload in sorted(cache.items()):
+        clusters = payload.get("clusters") or []
+        anchor = payload.get("anchor")
+        ts_parts = parse_timestamp_parts(payload.get("timestamp"))
+        if ts_parts is None:
+            continue
+        for cluster in clusters:
+            low = cluster.get("low")
+            high = cluster.get("high")
+            side = cluster.get("side")
+            if low is None or high is None or side not in ("bullish", "bearish"):
+                continue
+            zones.append(
+                {
+                    "symbol": symbol,
+                    "low": float(low),
+                    "high": float(high),
+                    "side": side,
+                    "year": ts_parts[0],
+                    "month": ts_parts[1],
+                    "day": ts_parts[2],
+                    "hour": ts_parts[3],
+                    "minute": ts_parts[4],
+                    "second": ts_parts[5],
+                    "anchor": anchor,
+                }
+            )
+
+    header = f"=== {generated_at} | PineScript v6 indicator (anchor clusters) ==="
+    if not zones:
+        return f"{header}\nno clusters available for indicator\n\n"
+
+    lines: List[str] = []
+    lines.append(header)
+    lines.append("```pine")
+    lines.append(
+        f"// Auto-generated at {generated_at}. Paste into TradingView Pine Editor."
+    )
+    lines.append("//@version=5")
+    lines.append(
+        'indicator("PhaseShifter Anchor Clusters", overlay=true, max_boxes_count=500)'
+    )
+    lines.append("type Zone")
+    lines.append("    string symbol")
+    lines.append("    float low")
+    lines.append("    float high")
+    lines.append("    int year")
+    lines.append("    int month")
+    lines.append("    int day")
+    lines.append("    int hour")
+    lines.append("    int minute")
+    lines.append("    int second")
+    lines.append("    string side")
+    lines.append("    float anchor")
+    lines.append("")
+    lines.append("var zones = array.new<Zone>()")
+    lines.append("if barstate.isfirst")
+    lines.append("    array.clear(zones)")
+    for zone in zones:
+        lines.append(
+            "    array.push(zones, Zone.new("
+            f'"{zone["symbol"]}", '
+            f"{zone['low']:.4f}, {zone['high']:.4f}, "
+            f"{zone['year']}, {zone['month']}, {zone['day']}, "
+            f"{zone['hour']}, {zone['minute']}, {zone['second']}, "
+            f'"{zone["side"]}", {0.0 if zone["anchor"] is None else float(zone["anchor"]):.4f}))'
+        )
+    lines.append("")
+    lines.append('tz = input.string("Europe/Ljubljana", "Timestamp timezone")')
+    symbols = sorted({z["symbol"] for z in zones})
+    input_map = []
+    for sym in symbols:
+        var_name = f"show_{sym.replace('-', '_').replace('/', '_').replace(':', '_')}"
+        input_map.append((sym, var_name))
+        lines.append(f'{var_name} = input.bool(true, "Show {sym} zones")')
+    lines.append("")
+    lines.append("border_col = color.new(color.gray, 60)")
+    lines.append("fill_col   = color.new(color.gray, 60)")
+    lines.append("")
+    lines.append("var boxes = array.new_box()")
+    lines.append("var bool built = false")
+    lines.append("zone_count = array.size(zones)")
+    lines.append("if not built and barstate.islast and zone_count > 0")
+    lines.append("    for i = 0 to zone_count - 1")
+    lines.append("        z = array.get(zones, i)")
+    lines.append("        show = true")
+    for sym, var_name in input_map:
+        lines.append(f'        show := show and (z.symbol != "{sym}" or {var_name})')
+    lines.append(
+        "        start_ts = timestamp(tz, z.year, z.month, z.day, z.hour, z.minute, z.second)"
+    )
+    lines.append("        if show")
+    lines.append("            left_ts  = math.min(start_ts, time)")
+    lines.append("            right_ts = time")
+    lines.append(
+        "            b = box.new(left_ts, z.high, right_ts, z.low, xloc=xloc.bar_time, "
+        "extend=extend.right, border_color=border_col, bgcolor=fill_col)"
+    )
+    lines.append(
+        '            box.set_text(b, str.format("{0} {1} [{2,number,#.####}-{3,number,#.####}] anchor={4,number,#.####}", '
+        "str.upper(z.side), z.symbol, z.low, z.high, z.anchor))"
+    )
+    lines.append("            array.push(boxes, b)")
+    lines.append("            built := true")
+    lines.append("")
+    lines.append("// Keep boxes extended to the latest bar")
+    lines.append("box_count = array.size(boxes)")
+    lines.append("if box_count > 0")
+    lines.append("    for i = 0 to box_count - 1")
+    lines.append("        box.set_right(array.get(boxes, i), time)")
+    lines.append("```")
+    lines.append("")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def parse_args() -> argparse.Namespace:
@@ -545,7 +693,17 @@ def main() -> None:
     )
     clusters = dedupe_overlapping_clusters(raw_clusters)
     clusters_section = format_clusters_section(timestamp, anchor, clusters)
-    write_nodes_file(timestamp, sections, aggregate, clusters_section)
+    cache = load_cluster_cache()
+    cache[ticker.upper()] = {
+        "timestamp": timestamp,
+        "anchor": anchor,
+        "clusters": [
+            {"side": c["side"], "low": c["low"], "high": c["high"]} for c in clusters
+        ],
+    }
+    persist_cluster_cache(cache)
+    pinescript_block = format_pinescript_indicator(cache, generated_at=timestamp)
+    write_nodes_file(timestamp, sections, aggregate, clusters_section, pinescript_block)
     print(f"[done] appended results to {NODES_OUTPUT}")
 
 

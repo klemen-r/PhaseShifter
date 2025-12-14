@@ -53,6 +53,7 @@ pnpm-lock.yaml
 ########################
 default.txt
 nodes.txt
+pinescript_clusters.json
 
 ########################
 # OS junk
