@@ -1,13 +1,11 @@
 "use client";
 import { AppSidebar } from "@/components/AppSidebar";
 import { CustomTrigger } from "@/components/customSideBarTrigger";
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   Card,
-  CardAction,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -22,129 +20,62 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { motion, AnimatePresence } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-
-type WSStatus = "open" | "connecting" | "closed" | "error";
-const RECONNECT_INTERVAL_MS = 1500;
+import { useWebSocket, useTradingData, type WSStatus } from "@/lib/websocket";
+import {
+  SubscriptionControls,
+  CandleTable,
+  ClustersDisplay,
+} from "@/components/websocket";
 
 export default function WebSocketDebug() {
-  const [messages, setMessages] = useState<string[]>([]);
-  const [status, setStatus] = useState<WSStatus>("connecting");
+  const {
+    status,
+    messages,
+    lastPingMs,
+    autoReconnect,
+    url,
+    connect,
+    ping,
+    setAutoReconnect,
+    clearMessages,
+    setDefaultUrl,
+  } = useWebSocket();
 
-  const [ip, setIp] = useState("ws://localhost:");
-  const [port, setPort] = useState("8000");
-  const [autoReconnect, setAutoReconnect] = useState(true);
+  const {
+    subscribedTickers,
+    subscribeTicker,
+    unsubscribeTicker,
+    requestClusters,
+    getCandles,
+    getClusters,
+  } = useTradingData();
 
-  const [lastPingMs, setLastPingMs] = useState<number | null>(null);
-  const pingSentAt = useRef<number | null>(null);
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Extract ip and port from current URL for the UI
+  const [draftIp, setDraftIp] = useState(() => {
+    const match = url.match(/^(wss?:\/\/[^:]+:?)/);
+    return match ? match[1] : "ws://localhost:";
+  });
+  const [draftPort, setDraftPort] = useState(() => {
+    const match = url.match(/:(\d+)$/);
+    return match ? match[1] : "8000";
+  });
 
-  const autoReconnectRef = useRef(autoReconnect);
-  const connectRef = useRef<() => void>(() => {});
-
-  const connect = useCallback(() => {
-    if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-    wsRef.current?.close();
-
-    setStatus("connecting");
-    const url = `${ip}${port}`;
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onopen = () => setStatus("open");
-    ws.onerror = () => setStatus("error");
-
-    ws.onclose = () => {
-      setStatus(autoReconnectRef.current ? "connecting" : "closed");
-      if (autoReconnectRef.current) {
-        reconnectTimeout.current = setTimeout(() => {
-          connectRef.current();
-        }, RECONNECT_INTERVAL_MS);
-      }
-    };
-
-    ws.onmessage = (event) => {
-      const rawData =
-        typeof event.data === "string" ? event.data : String(event.data);
-
-      // pong messages can come back as either a bare string or JSON
-      let parsed: unknown;
-      if (typeof rawData === "string") {
-        try {
-          parsed = JSON.parse(rawData);
-        } catch {
-          parsed = null;
-        }
-      }
-
-      const parsedObj =
-        parsed && typeof parsed === "object"
-          ? (parsed as { msg?: string; type?: string })
-          : null;
-
-      const isPong =
-        rawData === "pong" ||
-        parsedObj?.msg === "pong" ||
-        parsedObj?.type === "pong";
-
-      if (isPong && pingSentAt.current !== null) {
-        const delta = (performance.now() - pingSentAt.current) * 1000;
-        setLastPingMs(Math.max(0, Math.round(delta)));
-        pingSentAt.current = null;
-        return;
-      }
-
-      setMessages((prev) => [rawData, ...prev]);
-    };
-  }, [ip, port]);
-
-  useEffect(() => {
-    connectRef.current = connect;
-  }, [connect]);
-
-  const handleSetAutoReconnect = useCallback(
-    (next: boolean) => {
-      autoReconnectRef.current = next;
-      setAutoReconnect(next);
-
-      if (!next) {
-        if (reconnectTimeout.current) {
-          clearTimeout(reconnectTimeout.current);
-          reconnectTimeout.current = null;
-        }
-        if (status === "connecting") {
-          setStatus("closed");
-        }
-        return;
-      }
-
-      if (status === "closed") {
-        connectRef.current();
-      }
-    },
-    [status],
-  );
-
-  useEffect(() => {
-    // run once on mount
-    connectRef.current();
-
-    return () => {
-      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-      wsRef.current?.close();
-    };
-  }, []);
-  const ping = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      pingSentAt.current = performance.now();
-      wsRef.current.send("ping");
-    }
+  const handleApply = () => {
+    const newUrl = `${draftIp}${draftPort}`;
+    setDefaultUrl(newUrl);
+    connect(newUrl);
   };
+
+  // Auto-select first ticker when subscriptions change
+  const tickersArray = Array.from(subscribedTickers);
+  const activeTicker = selectedTicker ?? tickersArray[0] ?? null;
 
   return (
     <div className="flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -153,46 +84,120 @@ export default function WebSocketDebug() {
 
       {/* main container */}
       <div className="w-full h-[calc(100vh-32px)] flex gap-4 m-4">
-        {/* left: log */}
-        <Card className="flex-1 border-zinc-800 bg-zinc-950/40 backdrop-blur">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Received Packets</CardTitle>
-          </CardHeader>
-          <CardContent className="h-[calc(100%-56px)]">
-            <ScrollArea className="h-full pr-4">
-              {messages.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-zinc-400">
-                  Not connected to any websocket...
-                </div>
+        {/* left: main content area */}
+        <div className="flex-1 flex flex-col gap-4">
+          {/* Subscription Controls */}
+          <SubscriptionControls
+            subscribedTickers={subscribedTickers}
+            onSubscribe={subscribeTicker}
+            onUnsubscribe={unsubscribeTicker}
+            onRequestClusters={requestClusters}
+            disabled={status !== "open"}
+          />
+
+          {/* Ticker selector if multiple tickers */}
+          {tickersArray.length > 1 && (
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-zinc-400">Viewing:</span>
+              {tickersArray.map((ticker) => (
+                <Button
+                  key={ticker}
+                  variant={activeTicker === ticker ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setSelectedTicker(ticker)}
+                  className="font-mono"
+                >
+                  {ticker}
+                </Button>
+              ))}
+            </div>
+          )}
+
+          {/* Data Display Tabs */}
+          <Tabs defaultValue="candles" className="flex-1">
+            <TabsList>
+              <TabsTrigger value="candles">Live Candles</TabsTrigger>
+              <TabsTrigger value="clusters">Clusters</TabsTrigger>
+              <TabsTrigger value="raw">Raw Messages</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="candles">
+              {activeTicker ? (
+                <CandleTable
+                  ticker={activeTicker}
+                  candles={getCandles(activeTicker)}
+                />
               ) : (
-                messages.map((msg, i) => (
-                  <Card key={i} className="mb-2 border-zinc-800 bg-zinc-900/40">
-                    <CardContent className="p-3 font-mono text-sm">
-                      {msg}
-                    </CardContent>
-                  </Card>
-                ))
+                <Card className="border-zinc-800 bg-zinc-950/40">
+                  <CardContent className="py-8 text-center text-zinc-500">
+                    Subscribe to a ticker to see live candles
+                  </CardContent>
+                </Card>
               )}
-              <ScrollBar />
-            </ScrollArea>
-          </CardContent>
-        </Card>
+            </TabsContent>
+
+            <TabsContent value="clusters">
+              {activeTicker ? (
+                <ClustersDisplay
+                  ticker={activeTicker}
+                  data={getClusters(activeTicker)}
+                />
+              ) : (
+                <Card className="border-zinc-800 bg-zinc-950/40">
+                  <CardContent className="py-8 text-center text-zinc-500">
+                    Subscribe to a ticker to see cluster projections
+                  </CardContent>
+                </Card>
+              )}
+            </TabsContent>
+
+            <TabsContent value="raw">
+              <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur h-[500px]">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Raw Messages</CardTitle>
+                </CardHeader>
+                <CardContent className="h-[calc(100%-56px)]">
+                  <ScrollArea className="h-full pr-4">
+                    {messages.length === 0 ? (
+                      <div className="h-full flex items-center justify-center text-zinc-400">
+                        No messages received...
+                      </div>
+                    ) : (
+                      messages.map((msg) => (
+                        <Card
+                          key={msg.id}
+                          className="mb-2 border-zinc-800 bg-zinc-900/40"
+                        >
+                          <CardContent className="p-3 font-mono text-sm">
+                            {msg.raw}
+                          </CardContent>
+                        </Card>
+                      ))
+                    )}
+                    <ScrollBar />
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
+        </div>
 
         {/* right: controls */}
         <div className="w-[360px]">
           <ConnectionCard
-            key={`${ip}-${port}`}
-            ip={ip}
-            port={port}
+            key={`${draftIp}-${draftPort}`}
+            ip={draftIp}
+            port={draftPort}
+            currentUrl={url}
             status={status}
             lastPingMs={lastPingMs}
             autoReconnect={autoReconnect}
-            setIp={setIp}
-            setPort={setPort}
-            setAutoReconnect={handleSetAutoReconnect}
-            onApply={connect}
+            setIp={setDraftIp}
+            setPort={setDraftPort}
+            setAutoReconnect={setAutoReconnect}
+            onApply={handleApply}
             onPing={ping}
-            onClear={() => setMessages([])}
+            onClear={clearMessages}
           />
         </div>
       </div>
@@ -201,14 +206,12 @@ export default function WebSocketDebug() {
 }
 
 export function ConnectionCard({
-  // live values from parent
   ip,
   port,
+  currentUrl,
   status,
   lastPingMs,
   autoReconnect,
-
-  // setters / actions from parent
   setIp,
   setPort,
   setAutoReconnect,
@@ -218,24 +221,20 @@ export function ConnectionCard({
 }: {
   ip: string;
   port: string;
+  currentUrl: string;
   status: WSStatus;
   lastPingMs: number | null;
   autoReconnect: boolean;
-
   setIp(v: string): void;
   setPort(v: string): void;
   setAutoReconnect(v: boolean): void;
-
   onApply(): void;
   onPing(): void;
   onClear(): void;
 }) {
-  // local draft so typing doesn't reconnect every keystroke
-  const [draftIp, setDraftIp] = useState(ip);
-  const [draftPort, setDraftPort] = useState(port);
   const [dirty, setDirty] = useState(false);
 
-  const url = useMemo(() => `${draftIp}${draftPort}`, [draftIp, draftPort]);
+  const targetUrl = useMemo(() => `${ip}${port}`, [ip, port]);
 
   const statusMeta = {
     open: { label: "Connected", color: "bg-emerald-500", icon: Wifi },
@@ -272,7 +271,7 @@ export function ConnectionCard({
 
         <CardDescription className="text-xs text-zinc-400">
           Current URL:{" "}
-          <span className="font-mono text-zinc-200">{`${ip}${port}`}</span>
+          <span className="font-mono text-zinc-200">{currentUrl}</span>
         </CardDescription>
       </CardHeader>
 
@@ -281,10 +280,10 @@ export function ConnectionCard({
           <Label htmlFor="ip">WebSocket host</Label>
           <Input
             id="ip"
-            value={draftIp}
+            value={ip}
             placeholder="ws://localhost:"
             onChange={(e) => {
-              setDraftIp(e.target.value);
+              setIp(e.target.value);
               setDirty(true);
             }}
             className="font-mono"
@@ -295,10 +294,10 @@ export function ConnectionCard({
           <Label htmlFor="port">Port</Label>
           <Input
             id="port"
-            value={draftPort}
+            value={port}
             placeholder="8000"
             onChange={(e) => {
-              setDraftPort(e.target.value.replace(/[^\d]/g, ""));
+              setPort(e.target.value.replace(/[^\d]/g, ""));
               setDirty(true);
             }}
             className="font-mono"
@@ -306,7 +305,7 @@ export function ConnectionCard({
         </div>
 
         <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-xs font-mono text-zinc-200">
-          Target: {url}
+          Target: {targetUrl}
         </div>
 
         <Separator className="bg-zinc-800" />
@@ -315,9 +314,8 @@ export function ConnectionCard({
         <div className="flex flex-wrap gap-2">
           <Button
             onClick={() => {
-              setIp(draftIp);
-              setPort(draftPort);
               onApply();
+              setDirty(false);
             }}
             disabled={!dirty}
             className="gap-2"

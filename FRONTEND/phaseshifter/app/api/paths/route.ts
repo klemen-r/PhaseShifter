@@ -9,6 +9,7 @@ export async function GET() {
     });
     return NextResponse.json(items);
   } catch (err) {
+    console.error("Prisma error:", err); // Add this line
     return NextResponse.json(
       { error: "Failed to load paths" },
       { status: 500 },
@@ -34,7 +35,7 @@ export async function POST(req: Request) {
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
     return NextResponse.json(
-      { error: "Failed to create path" },
+      { error: "Failed to create path: " + err },
       { status: 500 },
     );
   }
@@ -50,7 +51,7 @@ export async function DELETE(req: Request) {
     return NextResponse.json(deleted, { status: 201 });
   } catch (err) {
     return NextResponse.json(
-      { error: "Failed to delete path" },
+      { error: "Failed to delete path" + err },
       { status: 500 },
     );
   }

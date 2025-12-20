@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
-import { Folder, Plus } from "lucide-react";
+import { Folder, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
   Sidebar,
@@ -32,6 +32,22 @@ export function AppSidebar() {
   const [open, setOpen] = useState(false);
   const [paths, setPaths] = useState<PathEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [editMode, setEditMode] = useState(false);
+
+  async function deletePath(id: string) {
+    try {
+      const res = await fetch("/api/paths", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patId: id }),
+      });
+      if (res.ok) {
+        loadPaths();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   async function loadPaths() {
     try {
@@ -79,9 +95,22 @@ export function AppSidebar() {
       <SidebarContent className="gap-2">
         {/* Paths group */}
         <SidebarGroup>
-          <SidebarGroupLabel className="px-2 text-zinc-400">
-            Paths
-          </SidebarGroupLabel>
+          <div className="flex items-center justify-between px-2">
+            <SidebarGroupLabel className="text-zinc-400">
+              Paths
+            </SidebarGroupLabel>
+            <button
+              onClick={() => setEditMode(!editMode)}
+              className={cn(
+                "p-1 rounded-md transition-colors",
+                "hover:bg-zinc-800/60",
+                editMode && "bg-zinc-800/80 text-zinc-200",
+              )}
+              title={editMode ? "Done editing" : "Edit paths"}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          </div>
 
           <SidebarGroupContent>
             <ScrollArea className="h-[45vh] pr-2">
@@ -111,11 +140,32 @@ export function AppSidebar() {
                           "bg-zinc-800/70 ring-1 ring-zinc-600/60",
                       )}
                     >
-                      <Link href={entry.href} onClick={toggleSidebar}>
-                        <Folder className="h-4 w-4 opacity-80" />
-                        <span className="truncate">
+                      <Link
+                        href={entry.href}
+                        onClick={editMode ? (e) => e.preventDefault() : toggleSidebar}
+                        className="flex items-center gap-2 w-full"
+                      >
+                        <Folder className="h-4 w-4 opacity-80 shrink-0" />
+                        <span className="truncate flex-1">
                           {entry.id === "home" ? "home" : entry.path}
                         </span>
+                        {editMode && entry.id !== "home" && (
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              deletePath(entry.id);
+                            }}
+                            className={cn(
+                              "p-1 rounded-md transition-colors shrink-0",
+                              "hover:bg-red-500/20 hover:text-red-400",
+                              "text-zinc-500",
+                            )}
+                            title={`Delete ${entry.path}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

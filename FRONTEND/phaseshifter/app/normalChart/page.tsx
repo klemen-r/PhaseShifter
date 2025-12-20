@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AppSidebar } from "@/components/AppSidebar";
 import { CustomTrigger } from "@/components/customSideBarTrigger";
@@ -10,9 +10,17 @@ import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { useSidebar } from "@/components/ui/sidebar";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { calculateDonchianMidpoint, type Candle } from "@/lib/calcDonchianMid";
 import { parseCsvToCandles } from "@/lib/parseCsv";
 import { ExtraSettingsDialog } from "@/components/nchartS";
+import {
+  useTradingData,
+  type WSCandle,
+  type ClustersData,
+} from "@/lib/websocket";
+import { ClustersDisplay } from "@/components/websocket";
+import type { UTCTimestamp, IPriceLine } from "lightweight-charts";
 
 import {
   createChart,
@@ -22,6 +30,18 @@ import {
   CandlestickSeries,
   LineType,
 } from "lightweight-charts";
+
+// Convert WebSocket candles to chart-compatible format
+function wsCandiesToChartCandles(wsCandles: WSCandle[]): Candle[] {
+  return wsCandles.map((c) => ({
+    time: Math.floor(c.time / 1000) as UTCTimestamp,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    volume: c.volume,
+  }));
+}
 
 const sampleData: Candle[] = [
   { time: "2024-11-18", open: 100, high: 110, low: 95, close: 105 },
@@ -46,18 +66,33 @@ export default function NormalChartPage() {
   const { open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const [showMidpoint, setShowMidpoint] = useState(true);
   const [phase, setPhaseAmount] = useState(5);
-  const [chartData, setChartData] = useState<Candle[]>(sampleData);
+  const [csvData, setCsvData] = useState<Candle[]>(sampleData);
   const [settings, setSettings] = useState<LineSettings>({
-    lineColor: "#800080",
+    lineColor: "#A06BF3",
     bgUpColor: "#006400",
     bgDownColor: "#8b0000",
     transparency: 96,
-    candleUpColor: "#22c55e",
-    candleDownColor: "#ef4444",
-    candleBorderUp: "#22c55e",
-    candleBorderDown: "#ef4444",
+    candleUpColor: "#F5F7FA",
+    candleDownColor: "#A0B4F3",
+    candleBorderUp: "#F5F7FA",
+    candleBorderDown: "#A0B4F3",
   });
   const [extraOpen, setExtraOpen] = useState(false);
+
+  // WebSocket data source
+  const [dataSource, setDataSource] = useState<"csv" | "websocket">("csv");
+  const [wsTicker, setWsTicker] = useState("NQ=F");
+
+  const {
+    status: wsStatus,
+    subscribedTickers,
+    subscribeTicker,
+    unsubscribeTicker,
+    getCandles,
+    getClusters,
+    requestClusters,
+    lastCandle,
+  } = useTradingData();
 
   const {
     lineColor,
@@ -75,6 +110,7 @@ export default function NormalChartPage() {
     if (openMobile) setOpenMobile(false);
   }, [open, openMobile, setOpen, setOpenMobile]);
 
+  // Load CSV data
   useEffect(() => {
     let active = true;
 
@@ -95,7 +131,7 @@ export default function NormalChartPage() {
 
         const parsed = parseCsvToCandles(text);
         if (active && parsed.length > 0) {
-          setChartData(parsed);
+          setCsvData(parsed);
         }
       } catch (err) {
         console.error(err);
@@ -108,6 +144,24 @@ export default function NormalChartPage() {
       active = false;
     };
   }, []);
+
+  // Subscribe to ticker when switching to WebSocket mode
+  useEffect(() => {
+    if (dataSource === "websocket" && wsStatus === "open") {
+      if (!subscribedTickers.has(wsTicker)) {
+        subscribeTicker(wsTicker);
+      }
+    }
+  }, [dataSource, wsStatus, wsTicker, subscribedTickers, subscribeTicker]);
+
+  // Compute chart data based on source
+  // Include lastCandle in deps to trigger updates when new candles arrive
+  const chartData = useMemo(() => {
+    if (dataSource === "csv") {
+      return csvData;
+    }
+    return wsCandiesToChartCandles(getCandles(wsTicker));
+  }, [dataSource, csvData, getCandles, wsTicker, lastCandle]);
 
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -123,7 +177,9 @@ export default function NormalChartPage() {
               <h2 className="text-base font-semibold text-zinc-100">
                 Price Chart
               </h2>
-              <div className="text-xs text-zinc-400">Sample feed</div>
+              <div className="text-xs text-zinc-400">
+                {dataSource === "csv" ? "CSV File" : `WS: ${wsTicker}`}
+              </div>
             </div>
 
             <div className="relative flex-1" onPointerDown={handleChartFocus}>
@@ -139,14 +195,122 @@ export default function NormalChartPage() {
                 candleDownColor={candleDownColor}
                 candleBorderUp={candleBorderUp}
                 candleBorderDown={candleBorderDown}
+                clusters={
+                  dataSource === "websocket" ? getClusters(wsTicker) : null
+                }
               />
             </div>
           </div>
         </div>
 
         <div className="w-[360px] space-y-4">
+          {/* Data Source Card */}
           <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur">
             <CardHeader className="pb-3">
+              <CardTitle className="text-base">Data Source</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex gap-2">
+                <Button
+                  variant={dataSource === "csv" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setDataSource("csv")}
+                  className="flex-1"
+                >
+                  CSV File
+                </Button>
+                <Button
+                  variant={dataSource === "websocket" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setDataSource("websocket")}
+                  className="flex-1"
+                >
+                  WebSocket
+                </Button>
+              </div>
+
+              {dataSource === "websocket" && (
+                <div className="space-y-3">
+                  <Label htmlFor="wsTicker">Ticker</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="wsTicker"
+                      value={wsTicker}
+                      onChange={(e) =>
+                        setWsTicker(e.target.value.toUpperCase())
+                      }
+                      placeholder="NQ=F"
+                      className="font-mono"
+                    />
+                    {subscribedTickers.has(wsTicker) ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => unsubscribeTicker(wsTicker)}
+                      >
+                        Unsub
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => subscribeTicker(wsTicker)}
+                        disabled={wsStatus !== "open"}
+                      >
+                        Sub
+                      </Button>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-xs">
+                      <Badge
+                        variant="outline"
+                        className={
+                          wsStatus === "open"
+                            ? "text-emerald-400 border-emerald-400/30"
+                            : wsStatus === "connecting"
+                              ? "text-amber-400 border-amber-400/30"
+                              : "text-zinc-400 border-zinc-400/30"
+                        }
+                      >
+                        {wsStatus}
+                      </Badge>
+                      <span className="text-zinc-400">
+                        {getCandles(wsTicker).length} candles
+                      </span>
+                    </div>
+                    {wsStatus !== "open" && (
+                      <div className="text-xs text-amber-400">
+                        Server not connected. Start the server with: python
+                        main.py
+                      </div>
+                    )}
+                    {wsStatus === "open" &&
+                      getCandles(wsTicker).length === 0 &&
+                      subscribedTickers.has(wsTicker) && (
+                        <div className="text-xs text-zinc-500">
+                          Waiting for candles... (server polls every 60s)
+                        </div>
+                      )}
+                  </div>
+                  <Separator className="bg-zinc-800" />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => requestClusters(wsTicker)}
+                    disabled={wsStatus !== "open"}
+                  >
+                    Get Clusters
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Chart Settings Card */}
+          <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur">
+            <CardHeader className="">
               <CardTitle className="text-base">Chart Settings</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -186,6 +350,13 @@ export default function NormalChartPage() {
               </Button>
             </CardContent>
           </Card>
+
+          {/* Clusters Display - only when in websocket mode */}
+          {dataSource === "websocket" && (
+            <div className="max-h-[calc(100vh-777px)]">
+              <ClustersDisplay ticker={wsTicker} data={getClusters(wsTicker)} />
+            </div>
+          )}
         </div>
       </div>
       <ExtraSettingsDialog
@@ -240,7 +411,11 @@ type Props = {
   candleDownColor: string;
   candleBorderUp: string;
   candleBorderDown: string;
+  clusters?: ClustersData | null;
 };
+
+// Cluster types for price lines
+type ClusterForLines = ClustersData;
 
 const colorWithAlpha = (hex: string, alpha: number) => {
   // supports #rrggbb or #rrggbbaa
@@ -265,6 +440,7 @@ export function PriceChart({
   candleDownColor,
   candleBorderUp,
   candleBorderDown,
+  clusters,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -274,6 +450,7 @@ export function PriceChart({
   const midpointSeriesRef = useRef<ReturnType<IChartApi["addSeries"]> | null>(
     null,
   );
+  const priceLinesRef = useRef<IPriceLine[]>([]);
   const bgColorRef = useRef<string | null>(null);
   const [currentBg, setCurrentBg] = useState<string | null>(null);
 
@@ -313,7 +490,7 @@ export function PriceChart({
     const midpointSeries = chart.addSeries(LineSeries, {
       color: lineColor,
       lineWidth: 2,
-      lineType: LineType.Step,
+      lineType: LineType.WithSteps,
     });
     midpointSeriesRef.current = midpointSeries;
 
@@ -335,6 +512,7 @@ export function PriceChart({
       chart.remove();
       candleSeriesRef.current = null;
       midpointSeriesRef.current = null;
+      priceLinesRef.current = [];
       chartRef.current = null;
     };
   }, []);
@@ -343,7 +521,7 @@ export function PriceChart({
     midpointSeriesRef.current?.applyOptions({
       color: lineColor,
       lineWidth: 2,
-      lineType: LineType.Step,
+      lineType: LineType.WithSteps,
     });
   }, [lineColor]);
 
@@ -400,6 +578,57 @@ export function PriceChart({
   useEffect(() => {
     midpointSeriesRef.current?.applyOptions({ visible: showMidpoint });
   }, [showMidpoint]);
+
+  // Draw cluster price lines
+  useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    // Remove existing price lines
+    priceLinesRef.current.forEach((line) => {
+      candleSeriesRef.current?.removePriceLine(line);
+    });
+    priceLinesRef.current = [];
+
+    if (!clusters?.clusters) return;
+
+    // Add price lines for each cluster (low and high)
+    clusters.clusters.forEach((cluster) => {
+      const isBullish = cluster.side === "bullish";
+      const color = isBullish ? "#22c55e" : "#ef4444";
+
+      // Line at cluster midpoint
+      const midpoint = (cluster.low + cluster.high) / 2;
+      const midLine = candleSeriesRef.current?.createPriceLine({
+        price: midpoint,
+        color: color,
+        lineWidth: 2,
+        lineStyle: 2, // Dashed
+        axisLabelVisible: true,
+        title: `${isBullish ? "▲" : "▼"} ${cluster.count}`,
+      });
+      if (midLine) priceLinesRef.current.push(midLine);
+
+      // Line at cluster low (thinner)
+      const lowLine = candleSeriesRef.current?.createPriceLine({
+        price: cluster.low,
+        color: color,
+        lineWidth: 1,
+        lineStyle: 3, // Dotted
+        axisLabelVisible: false,
+      });
+      if (lowLine) priceLinesRef.current.push(lowLine);
+
+      // Line at cluster high (thinner)
+      const highLine = candleSeriesRef.current?.createPriceLine({
+        price: cluster.high,
+        color: color,
+        lineWidth: 1,
+        lineStyle: 3, // Dotted
+        axisLabelVisible: false,
+      });
+      if (highLine) priceLinesRef.current.push(highLine);
+    });
+  }, [clusters]);
 
   return (
     <div className="absolute inset-0 h-full w-full min-h-[480px]">

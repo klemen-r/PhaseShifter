@@ -185,8 +185,8 @@ export function ExtraSettingsDialog({
               <span className="text-zinc-200">Stepped line</span>
               <Switch
                 checked
-                readOnly
-                className="pointer-events-none opacity-60"
+                disabled
+                className="opacity-60"
               />
             </div>
             <p className="mt-1">
