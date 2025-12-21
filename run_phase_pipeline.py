@@ -12,6 +12,7 @@ import argparse
 import importlib.util
 import json
 import math
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -487,9 +488,72 @@ def parse_timestamp_parts(
     return (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
 
 
+def sanitize_indicator_symbol(symbol: str) -> str:
+    if not isinstance(symbol, str):
+        return ""
+    sanitized = symbol.split("=", 1)[0].strip()
+    return sanitized.replace("^", "")
+
+
+def copy_to_clipboard(text: str) -> Tuple[bool, str]:
+    """
+    Copy text to clipboard using common OS utilities; returns (success, reason).
+    """
+    if not text:
+        return False, "empty text"
+
+    candidates: List[List[str]] = []
+    if sys.platform.startswith("win"):
+        candidates.append(["clip"])
+    if sys.platform == "darwin":
+        candidates.append(["pbcopy"])
+    candidates.extend(
+        [
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+        ]
+    )
+
+    for cmd in candidates:
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            subprocess.run(cmd, input=text, text=True, check=True)
+            return True, f"used {cmd[0]}"
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+    return False, locals().get("last_error", "no clipboard utility available")
+
+
+def strip_indicator_wrappers(indicator: str) -> str:
+    """
+    Remove header and fence lines from the generated PineScript block for clean copy.
+    """
+    lines = indicator.splitlines()
+    cleaned: List[str] = []
+    for line in lines:
+        if line.startswith("```"):
+            continue
+        if line.startswith("=== ") and "PineScript v6 indicator" in line:
+            continue
+        cleaned.append(line)
+
+    # Trim leading/trailing empty lines after removal
+    while cleaned and cleaned[0].strip() == "":
+        cleaned.pop(0)
+    while cleaned and cleaned[-1].strip() == "":
+        cleaned.pop()
+    return "\n".join(cleaned)
+
+
 def format_pinescript_indicator(cache: dict, generated_at: str) -> str:
     zones: List[dict] = []
     for symbol, payload in sorted(cache.items()):
+        clean_symbol = sanitize_indicator_symbol(symbol)
+        if not clean_symbol:
+            continue
         clusters = payload.get("clusters") or []
         anchor = payload.get("anchor")
         ts_parts = parse_timestamp_parts(payload.get("timestamp"))
@@ -503,7 +567,7 @@ def format_pinescript_indicator(cache: dict, generated_at: str) -> str:
                 continue
             zones.append(
                 {
-                    "symbol": symbol,
+                    "symbol": clean_symbol,
                     "low": float(low),
                     "high": float(high),
                     "side": side,
@@ -529,7 +593,7 @@ def format_pinescript_indicator(cache: dict, generated_at: str) -> str:
     )
     lines.append("//@version=5")
     lines.append(
-        'indicator("PhaseShifter Anchor Clusters", overlay=true, max_boxes_count=500)'
+        'indicator("PhaseShifter Clusters", overlay=true, max_boxes_count=500)'
     )
     lines.append("type Zone")
     lines.append("    string symbol")
@@ -703,6 +767,12 @@ def main() -> None:
     }
     persist_cluster_cache(cache)
     pinescript_block = format_pinescript_indicator(cache, generated_at=timestamp)
+    clipboard_text = strip_indicator_wrappers(pinescript_block)
+    copied, reason = copy_to_clipboard(clipboard_text)
+    if copied:
+        print(f"[clipboard] copied PineScript indicator to clipboard ({reason})")
+    else:
+        print(f"[clipboard] failed to copy PineScript indicator: {reason}")
     write_nodes_file(timestamp, sections, aggregate, clusters_section, pinescript_block)
     print(f"[done] appended results to {NODES_OUTPUT}")
 

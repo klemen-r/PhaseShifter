@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 
 
 class DataStreamer:
+    PRIMARY_INTERVAL = "1m"
+    FALLBACK_INTERVAL = "5m"
+    FLAT_RATIO_THRESHOLD = 0.9
+    FLAT_MIN_SAMPLES = 30
+
     def __init__(self, server: "WebSocketServer", poll_interval: int = 60):
         self.server = server
         self.poll_interval = poll_interval  # seconds
@@ -22,6 +27,7 @@ class DataStreamer:
 
         # Track last candle time per ticker to avoid duplicates
         self._last_candle_time: dict[str, int] = {}
+        self._preferred_interval: dict[str, str] = {}
 
     async def start(self):
         """Start the data streaming loop."""
@@ -60,38 +66,32 @@ class DataStreamer:
         for ticker in tickers:
             try:
                 candles = await loop.run_in_executor(
-                    None,
-                    lambda t=ticker: self._fetch_latest_candles(t)
+                    None, lambda t=ticker: self._fetch_latest_candles(t)
                 )
 
                 if candles:
                     for candle in candles:
-                        await self.server.broadcast_to_ticker(ticker, {
-                            "type": "candle",
-                            "ticker": ticker,
-                            "data": candle,
-                        })
+                        await self.server.broadcast_to_ticker(
+                            ticker,
+                            {
+                                "type": "candle",
+                                "ticker": ticker,
+                                "data": candle,
+                            },
+                        )
             except Exception as e:
                 print(f"[Streamer] Error fetching {ticker}: {e}")
 
     def _fetch_latest_candles(self, ticker: str) -> list[dict]:
         """Fetch latest 1m candles from yfinance."""
         try:
-            # Fetch last 5 minutes of data to ensure we get the latest
-            data = yf.download(
-                ticker,
-                period="1d",
-                interval="1m",
-                progress=False,
-                auto_adjust=False,
+            interval = self._preferred_interval.get(ticker, self.PRIMARY_INTERVAL)
+            data = self._download_data(ticker, period="1d", interval=interval)
+            data, interval = self._apply_fallback_if_needed(
+                ticker, data, interval, period="1d"
             )
-
             if data.empty:
                 return []
-
-            # Handle multi-index columns from yfinance
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
 
             candles = []
             last_time = self._last_candle_time.get(ticker, 0)
@@ -144,18 +144,20 @@ class DataStreamer:
 
         try:
             candles = await loop.run_in_executor(
-                None,
-                lambda: self._fetch_all_candles(ticker)
+                None, lambda: self._fetch_all_candles(ticker)
             )
 
             if candles:
                 print(f"    → Sending {len(candles)} initial candles to {client_id}")
                 for candle in candles:
-                    await self.server.send_to_client(client_id, {
-                        "type": "candle",
-                        "ticker": ticker,
-                        "data": candle,
-                    })
+                    await self.server.send_to_client(
+                        client_id,
+                        {
+                            "type": "candle",
+                            "ticker": ticker,
+                            "data": candle,
+                        },
+                    )
             else:
                 print(f"    → No candle data available for {ticker}")
 
@@ -165,20 +167,13 @@ class DataStreamer:
     def _fetch_all_candles(self, ticker: str) -> list[dict]:
         """Fetch all available 1m candles from yfinance (1 day)."""
         try:
-            data = yf.download(
-                ticker,
-                period="1d",
-                interval="1m",
-                progress=False,
-                auto_adjust=False,
+            interval = self._preferred_interval.get(ticker, self.PRIMARY_INTERVAL)
+            data = self._download_data(ticker, period="1d", interval=interval)
+            data, interval = self._apply_fallback_if_needed(
+                ticker, data, interval, period="1d"
             )
-
             if data.empty:
                 return []
-
-            # Handle multi-index columns from yfinance
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
 
             candles = []
             for idx, row in data.iterrows():
@@ -194,7 +189,10 @@ class DataStreamer:
                 candles.append(candle)
 
                 # Update last candle time for this ticker
-                if ticker not in self._last_candle_time or ts > self._last_candle_time[ticker]:
+                if (
+                    ticker not in self._last_candle_time
+                    or ts > self._last_candle_time[ticker]
+                ):
                     self._last_candle_time[ticker] = ts
 
             return candles
@@ -202,3 +200,48 @@ class DataStreamer:
         except Exception as e:
             print(f"[Streamer] yfinance error for {ticker}: {e}")
             return []
+
+    def _download_data(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
+        data = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+        )
+        if data.empty:
+            return data
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        return data
+
+    def _apply_fallback_if_needed(
+        self,
+        ticker: str,
+        data: pd.DataFrame,
+        interval: str,
+        period: str,
+    ) -> tuple[pd.DataFrame, str]:
+        if interval != self.PRIMARY_INTERVAL or data.empty:
+            return data, interval
+
+        if not self._should_fallback(data):
+            return data, interval
+
+        fallback = self._download_data(
+            ticker, period=period, interval=self.FALLBACK_INTERVAL
+        )
+        if fallback.empty:
+            return data, interval
+
+        if self._preferred_interval.get(ticker) != self.FALLBACK_INTERVAL:
+            print(f"[Streamer] {ticker} 1m data looks flat; switching to 5m candles.")
+        self._preferred_interval[ticker] = self.FALLBACK_INTERVAL
+        return fallback, self.FALLBACK_INTERVAL
+
+    def _should_fallback(self, data: pd.DataFrame) -> bool:
+        ohlc = data[["Open", "High", "Low", "Close"]].dropna(how="any")
+        if len(ohlc) < self.FLAT_MIN_SAMPLES:
+            return False
+        flat = (ohlc["High"] == ohlc["Low"]).mean()
+        return float(flat) >= self.FLAT_RATIO_THRESHOLD
