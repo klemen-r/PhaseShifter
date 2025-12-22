@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
-import { Folder, Pencil, Plus, Trash2 } from "lucide-react";
+import { Folder, Pencil, Plus, Trash2, LineChart, Radio, FlaskConical } from "lucide-react";
 
 import {
   Sidebar,
@@ -93,6 +93,73 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent className="gap-2">
+        {/* Quick Links */}
+        <SidebarGroup>
+          <SidebarGroupLabel className="px-2 text-zinc-400">
+            Quick Links
+          </SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu className="px-1">
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname === "/testChart"}
+                  className={cn(
+                    "h-9 gap-2 rounded-md px-3",
+                    "transition-colors",
+                    "hover:bg-zinc-800/60 dark:hover:bg-zinc-800/60",
+                    pathname === "/testChart" &&
+                      "bg-zinc-800/70 ring-1 ring-zinc-600/60",
+                  )}
+                >
+                  <Link href="/testChart" onClick={toggleSidebar}>
+                    <FlaskConical className="h-4 w-4 opacity-80" />
+                    <span>Test Chart</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname === "/normalChart"}
+                  className={cn(
+                    "h-9 gap-2 rounded-md px-3",
+                    "transition-colors",
+                    "hover:bg-zinc-800/60 dark:hover:bg-zinc-800/60",
+                    pathname === "/normalChart" &&
+                      "bg-zinc-800/70 ring-1 ring-zinc-600/60",
+                  )}
+                >
+                  <Link href="/normalChart" onClick={toggleSidebar}>
+                    <LineChart className="h-4 w-4 opacity-80" />
+                    <span>Chart</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname === "/webSocket"}
+                  className={cn(
+                    "h-9 gap-2 rounded-md px-3",
+                    "transition-colors",
+                    "hover:bg-zinc-800/60 dark:hover:bg-zinc-800/60",
+                    pathname === "/webSocket" &&
+                      "bg-zinc-800/70 ring-1 ring-zinc-600/60",
+                  )}
+                >
+                  <Link href="/webSocket" onClick={toggleSidebar}>
+                    <Radio className="h-4 w-4 opacity-80" />
+                    <span>WebSocket</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarSeparator className="bg-zinc-800/60" />
+
         {/* Paths group */}
         <SidebarGroup>
           <div className="flex items-center justify-between px-2">

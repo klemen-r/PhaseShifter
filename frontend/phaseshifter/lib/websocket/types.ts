@@ -119,13 +119,25 @@ export interface PongMessage {
   type: "pong";
 }
 
+export interface AutoClustersEnabledMessage {
+  type: "auto_clusters_enabled";
+  ticker: string;
+}
+
+export interface AutoClustersDisabledMessage {
+  type: "auto_clusters_disabled";
+  ticker: string;
+}
+
 export type ServerMessage =
   | CandleMessage
   | ClustersMessage
   | SubscribedMessage
   | UnsubscribedMessage
   | ErrorMessage
-  | PongMessage;
+  | PongMessage
+  | AutoClustersEnabledMessage
+  | AutoClustersDisabledMessage;
 
 // Type guards
 export function isCandleMessage(msg: unknown): msg is CandleMessage {
@@ -173,6 +185,28 @@ export function isErrorMessage(msg: unknown): msg is ErrorMessage {
   );
 }
 
+export function isAutoClustersEnabledMessage(
+  msg: unknown
+): msg is AutoClustersEnabledMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "auto_clusters_enabled"
+  );
+}
+
+export function isAutoClustersDisabledMessage(
+  msg: unknown
+): msg is AutoClustersDisabledMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "auto_clusters_disabled"
+  );
+}
+
 export function parseServerMessage(data: unknown): ServerMessage | null {
   if (typeof data !== "object" || data === null || !("type" in data)) {
     return null;
@@ -184,7 +218,9 @@ export function parseServerMessage(data: unknown): ServerMessage | null {
     type === "subscribed" ||
     type === "unsubscribed" ||
     type === "error" ||
-    type === "pong"
+    type === "pong" ||
+    type === "auto_clusters_enabled" ||
+    type === "auto_clusters_disabled"
   ) {
     return data as ServerMessage;
   }

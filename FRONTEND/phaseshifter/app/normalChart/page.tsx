@@ -20,7 +20,7 @@ import {
   type ClustersData,
 } from "@/lib/websocket";
 import { ClustersDisplay } from "@/components/websocket";
-import type { UTCTimestamp, IPriceLine } from "lightweight-charts";
+import type { UTCTimestamp, Time, ISeriesApi } from "lightweight-charts";
 
 import {
   createChart,
@@ -30,6 +30,10 @@ import {
   CandlestickSeries,
   LineType,
 } from "lightweight-charts";
+import {
+  ClusterRectanglesPrimitive,
+  type ClusterRect,
+} from "@/lib/chart/ClusterRectanglesPrimitive";
 
 // Convert WebSocket candles to chart-compatible format
 function wsCandiesToChartCandles(wsCandles: WSCandle[]): Candle[] {
@@ -83,6 +87,9 @@ export default function NormalChartPage() {
   const [dataSource, setDataSource] = useState<"csv" | "websocket">("csv");
   const [wsTicker, setWsTicker] = useState("NQ=F");
 
+  // Cluster display settings
+  const [clusterOpacity, setClusterOpacity] = useState(25); // 10-80%
+
   const {
     status: wsStatus,
     subscribedTickers,
@@ -92,6 +99,9 @@ export default function NormalChartPage() {
     getClusters,
     requestClusters,
     lastCandle,
+    enableAutoClusters,
+    disableAutoClusters,
+    isAutoClustersEnabled,
   } = useTradingData();
 
   const {
@@ -152,7 +162,7 @@ export default function NormalChartPage() {
         subscribeTicker(wsTicker);
       }
     }
-  }, [dataSource, wsStatus, wsTicker, subscribedTickers, subscribeTicker]);
+  }, [dataSource, wsStatus, subscribedTickers, subscribeTicker]);
 
   // Compute chart data based on source
   // Include lastCandle in deps to trigger updates when new candles arrive
@@ -161,7 +171,7 @@ export default function NormalChartPage() {
       return csvData;
     }
     return wsCandiesToChartCandles(getCandles(wsTicker));
-  }, [dataSource, csvData, getCandles, wsTicker, lastCandle]);
+  }, [dataSource, csvData, getCandles, lastCandle]);
 
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -198,6 +208,7 @@ export default function NormalChartPage() {
                 clusters={
                   dataSource === "websocket" ? getClusters(wsTicker) : null
                 }
+                clusterOpacity={clusterOpacity}
               />
             </div>
           </div>
@@ -303,6 +314,26 @@ export default function NormalChartPage() {
                   >
                     Get Clusters
                   </Button>
+
+                  {/* Auto-fetch toggle - only show if we have clusters */}
+                  {getClusters(wsTicker) && (
+                    <div className="flex items-center justify-between pt-2">
+                      <Label className="text-sm text-zinc-200">
+                        Auto-refresh (5 min)
+                      </Label>
+                      <Switch
+                        checked={isAutoClustersEnabled(wsTicker)}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            enableAutoClusters(wsTicker);
+                          } else {
+                            disableAutoClusters(wsTicker);
+                          }
+                        }}
+                        disabled={wsStatus !== "open"}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>
@@ -338,6 +369,32 @@ export default function NormalChartPage() {
                   onCheckedChange={setShowMidpoint}
                 />
               </div>
+
+              {/* Cluster Opacity - only shown in WebSocket mode */}
+              {dataSource === "websocket" && (
+                <>
+                  <Separator className="bg-zinc-800" />
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm text-zinc-200">
+                        Cluster Opacity
+                      </Label>
+                      <span className="text-xs text-zinc-400">
+                        {clusterOpacity}%
+                      </span>
+                    </div>
+                    <Input
+                      type="range"
+                      min={10}
+                      max={80}
+                      value={clusterOpacity}
+                      onChange={(e) =>
+                        setClusterOpacity(Number(e.target.value))
+                      }
+                    />
+                  </div>
+                </>
+              )}
 
               <Separator className="bg-zinc-800" />
 
@@ -412,10 +469,8 @@ type Props = {
   candleBorderUp: string;
   candleBorderDown: string;
   clusters?: ClustersData | null;
+  clusterOpacity?: number; // 10-80%, controls cluster rectangle transparency
 };
-
-// Cluster types for price lines
-type ClusterForLines = ClustersData;
 
 const colorWithAlpha = (hex: string, alpha: number) => {
   // supports #rrggbb or #rrggbbaa
@@ -441,16 +496,15 @@ export function PriceChart({
   candleBorderUp,
   candleBorderDown,
   clusters,
+  clusterOpacity = 25,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ReturnType<IChartApi["addSeries"]> | null>(
-    null,
-  );
+  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const midpointSeriesRef = useRef<ReturnType<IChartApi["addSeries"]> | null>(
     null,
   );
-  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const clusterPrimitiveRef = useRef<ClusterRectanglesPrimitive | null>(null);
   const bgColorRef = useRef<string | null>(null);
   const [currentBg, setCurrentBg] = useState<string | null>(null);
 
@@ -494,6 +548,11 @@ export function PriceChart({
     });
     midpointSeriesRef.current = midpointSeries;
 
+    // --- cluster rectangles primitive ---
+    const clusterPrimitive = new ClusterRectanglesPrimitive();
+    candleSeries.attachPrimitive(clusterPrimitive);
+    clusterPrimitiveRef.current = clusterPrimitive;
+
     // responsive resize
     const ro = new ResizeObserver((entries) => {
       if (!chartRef.current) return;
@@ -512,7 +571,7 @@ export function PriceChart({
       chart.remove();
       candleSeriesRef.current = null;
       midpointSeriesRef.current = null;
-      priceLinesRef.current = [];
+      clusterPrimitiveRef.current = null;
       chartRef.current = null;
     };
   }, []);
@@ -579,56 +638,47 @@ export function PriceChart({
     midpointSeriesRef.current?.applyOptions({ visible: showMidpoint });
   }, [showMidpoint]);
 
-  // Draw cluster price lines
+  // Draw cluster rectangles
   useEffect(() => {
-    if (!candleSeriesRef.current) return;
+    if (!clusterPrimitiveRef.current) return;
 
-    // Remove existing price lines
-    priceLinesRef.current.forEach((line) => {
-      candleSeriesRef.current?.removePriceLine(line);
-    });
-    priceLinesRef.current = [];
+    if (!clusters?.clusters?.length || data.length === 0) {
+      clusterPrimitiveRef.current.clearRectangles();
+      return;
+    }
 
-    if (!clusters?.clusters) return;
+    // Use the first candle time as the start time for rectangles
+    const firstCandle = data[0];
+    const startTime = (
+      typeof firstCandle.time === "number"
+        ? firstCandle.time
+        : Math.floor(new Date(firstCandle.time as string).getTime() / 1000)
+    ) as Time;
 
-    // Add price lines for each cluster (low and high)
-    clusters.clusters.forEach((cluster) => {
+    // Convert clusterOpacity (10-80%) to decimal (0.1-0.8)
+    const opacity = clusterOpacity / 100;
+
+    const rects: ClusterRect[] = clusters.clusters.map((cluster, idx) => {
       const isBullish = cluster.side === "bullish";
-      const color = isBullish ? "#22c55e" : "#ef4444";
+      // === COLOR: RGB values for cluster fill ===
+      // Green (34, 197, 94) for bullish, Red (239, 68, 68) for bearish
+      const baseColor = isBullish ? "34, 197, 94" : "239, 68, 68";
+      const label = `${isBullish ? "▲" : "▼"} ${cluster.count} (${cluster.unique_scenarios} scenarios)`;
 
-      // Line at cluster midpoint
-      const midpoint = (cluster.low + cluster.high) / 2;
-      const midLine = candleSeriesRef.current?.createPriceLine({
-        price: midpoint,
-        color: color,
-        lineWidth: 2,
-        lineStyle: 2, // Dashed
-        axisLabelVisible: true,
-        title: `${isBullish ? "▲" : "▼"} ${cluster.count}`,
-      });
-      if (midLine) priceLinesRef.current.push(midLine);
-
-      // Line at cluster low (thinner)
-      const lowLine = candleSeriesRef.current?.createPriceLine({
-        price: cluster.low,
-        color: color,
-        lineWidth: 1,
-        lineStyle: 3, // Dotted
-        axisLabelVisible: false,
-      });
-      if (lowLine) priceLinesRef.current.push(lowLine);
-
-      // Line at cluster high (thinner)
-      const highLine = candleSeriesRef.current?.createPriceLine({
-        price: cluster.high,
-        color: color,
-        lineWidth: 1,
-        lineStyle: 3, // Dotted
-        axisLabelVisible: false,
-      });
-      if (highLine) priceLinesRef.current.push(highLine);
+      return {
+        id: `cluster-${idx}`,
+        low: cluster.low,
+        high: cluster.high,
+        startTime,
+        // === COLOR: Fill with configurable opacity from slider ===
+        color: `rgba(${baseColor}, ${opacity})`,
+        side: cluster.side,
+        label,
+      };
     });
-  }, [clusters]);
+
+    clusterPrimitiveRef.current.setRectangles(rects);
+  }, [clusters, data, clusterOpacity]);
 
   return (
     <div className="absolute inset-0 h-full w-full min-h-[480px]">

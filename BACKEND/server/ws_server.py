@@ -18,12 +18,14 @@ class Client:
     id: str
     websocket: WebSocketServerProtocol
     subscriptions: set[str] = field(default_factory=set)
+    auto_clusters: set[str] = field(default_factory=set)  # Tickers with auto-clusters enabled
     connected_at: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "subscriptions": list(self.subscriptions),
+            "auto_clusters": list(self.auto_clusters),
             "connected_at": self.connected_at.isoformat(),
         }
 
@@ -138,6 +140,22 @@ class WebSocketServer:
             else:
                 await self._send_error(client, "Cluster data not available")
 
+        elif msg_type == "enable_auto_clusters":
+            ticker = msg.get("ticker")
+            if not ticker:
+                await self._send_error(client, "Missing ticker")
+                return
+            client.auto_clusters.add(ticker)
+            await self._send(client, {"type": "auto_clusters_enabled", "ticker": ticker})
+            print(f"    {client.id} enabled auto-clusters for {ticker}")
+
+        elif msg_type == "disable_auto_clusters":
+            ticker = msg.get("ticker")
+            if ticker and ticker in client.auto_clusters:
+                client.auto_clusters.discard(ticker)
+                await self._send(client, {"type": "auto_clusters_disabled", "ticker": ticker})
+                print(f"    {client.id} disabled auto-clusters for {ticker}")
+
         else:
             await self._send_error(client, f"Unknown message type: {msg_type}")
 
@@ -199,6 +217,24 @@ class WebSocketServer:
             for client in self.clients.values()
             if ticker in client.subscriptions
         ]
+
+    def get_auto_cluster_subscribers(self, ticker: str) -> list[str]:
+        """Get list of client IDs with auto-clusters enabled for a ticker."""
+        return [
+            client.id
+            for client in self.clients.values()
+            if ticker in client.auto_clusters
+        ]
+
+    async def broadcast_to_auto_cluster_clients(self, ticker: str, data: dict):
+        """Broadcast message only to clients with auto-clusters enabled for ticker."""
+        message = json.dumps(data)
+        for client in list(self.clients.values()):
+            if ticker in client.auto_clusters:
+                try:
+                    await client.websocket.send(message)
+                except websockets.ConnectionClosed:
+                    pass
 
     def get_status(self) -> dict:
         """Get server status."""

@@ -1,3 +1,20 @@
+/**
+ * ClusterRectanglesPrimitive - Custom LightweightCharts primitive for rendering cluster zones
+ *
+ * This primitive draws semi-transparent rectangular zones on the chart representing
+ * price clusters (bullish targets above current price, bearish targets below).
+ *
+ * COLOR SCHEME:
+ * - Bullish clusters: Green (#22c55e / rgb(34, 197, 94))
+ * - Bearish clusters: Red (#ef4444 / rgb(239, 68, 68))
+ *
+ * VISUAL ELEMENTS:
+ * 1. Filled rectangle with configurable opacity (from rect.color)
+ * 2. Left border accent (2px solid) for visual emphasis
+ * 3. Top/bottom dashed lines (50% opacity) extending to chart edge
+ * 4. Optional label badge with count information
+ */
+
 import type {
   ISeriesPrimitive,
   SeriesAttachedParameter,
@@ -13,6 +30,7 @@ export interface ClusterRect {
   low: number;
   high: number;
   startTime: Time;
+  /** Fill color with opacity, e.g. "rgba(34, 197, 94, 0.25)" */
   color: string;
   side: "bullish" | "bearish";
   label?: string;
@@ -42,19 +60,19 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
     // Early exit if no data
     if (this._rects.length === 0) return;
 
-    const series = this._series;
-    if (!series) return;
+    const param = this._series;
+    if (!param) return;
 
     // Check if chart and timeScale are available
-    const chart = series.chart;
+    const chart = param.chart;
     if (!chart) return;
 
     const timeScale = chart.timeScale();
     if (!timeScale) return;
 
-    // Check if series has priceToCoordinate method
-    const seriesApi = series as unknown as SeriesApi;
-    if (typeof seriesApi.priceToCoordinate !== "function") return;
+    // Get the actual series API which has priceToCoordinate
+    const seriesApi = param.series as unknown as SeriesApi;
+    if (!seriesApi || typeof seriesApi.priceToCoordinate !== "function") return;
 
     target.useMediaCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -75,29 +93,81 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
           if (topY === null || bottomY === null) continue;
 
           const x = startX;
-          const y = topY;
+          const y = Math.min(topY, bottomY);
           const width = rightCoord - startX;
-          const height = bottomY - topY;
+          const height = Math.abs(bottomY - topY);
 
           // Skip if dimensions are invalid
           if (width <= 0 || height === 0) continue;
 
-          // Draw filled rectangle with transparency
+          const borderRadius = Math.min(4, height / 2, width / 2);
+          const isBullish = rect.side === "bullish";
+
+          // === COLOR: Border color based on cluster side ===
+          // Green (#22c55e) for bullish targets, Red (#ef4444) for bearish targets
+          const borderColor = isBullish ? "#22c55e" : "#ef4444";
+
+          // === FILL: Semi-transparent rectangle background ===
+          // Color comes from rect.color which includes opacity (e.g. "rgba(34, 197, 94, 0.25)")
+          // Opacity is controlled by the clusterOpacity setting in the parent component
+          ctx.beginPath();
+          ctx.roundRect(x, y, width, height, [borderRadius, 0, 0, borderRadius]);
           ctx.fillStyle = rect.color;
-          ctx.fillRect(x, y, width, Math.abs(height));
+          ctx.fill();
 
-          // Draw border
-          ctx.strokeStyle = rect.side === "bullish" ? "#22c55e" : "#ef4444";
+          // === LEFT BORDER: Colored accent line (2px) ===
+          // Thicker border on left edge to highlight cluster zone boundary
+          // Uses same green/red color scheme based on bullish/bearish side
+          ctx.beginPath();
+          ctx.moveTo(x + borderRadius, y);
+          ctx.lineTo(x, y + borderRadius);
+          ctx.lineTo(x, y + height - borderRadius);
+          ctx.lineTo(x + borderRadius, y + height);
+          ctx.strokeStyle = borderColor;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // === DASHED BORDERS: Top and bottom horizontal lines ===
+          // Subtle dashed lines at 50% opacity (globalAlpha = 0.5)
+          // Dash pattern: 4px on, 4px off
+          // Extends from left edge to right edge of chart
+          ctx.beginPath();
+          ctx.setLineDash([4, 4]);
+          ctx.moveTo(x + borderRadius, y);
+          ctx.lineTo(x + width, y);
+          ctx.moveTo(x + borderRadius, y + height);
+          ctx.lineTo(x + width, y + height);
+          ctx.strokeStyle = borderColor;
           ctx.lineWidth = 1;
-          ctx.strokeRect(x, y, width, Math.abs(height));
+          ctx.globalAlpha = 0.5;
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
 
-          // Draw label if present
+          // === LABEL: Badge with cluster info ===
           if (rect.label) {
-            ctx.font = "11px sans-serif";
-            ctx.fillStyle = rect.side === "bullish" ? "#22c55e" : "#ef4444";
+            const padding = 6;
+            ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, sans-serif";
+            const textMetrics = ctx.measureText(rect.label);
+            const textHeight = 14;
+            const labelBgWidth = textMetrics.width + padding * 2;
+            const labelBgHeight = textHeight + padding;
+
+            // === LABEL BACKGROUND: Solid color at 90% opacity ===
+            // Green rgba(34, 197, 94, 0.9) for bullish
+            // Red rgba(239, 68, 68, 0.9) for bearish
+            ctx.fillStyle = isBullish
+              ? "rgba(34, 197, 94, 0.9)"
+              : "rgba(239, 68, 68, 0.9)";
+            ctx.beginPath();
+            ctx.roundRect(x + 4, y + 4, labelBgWidth, labelBgHeight, 3);
+            ctx.fill();
+
+            // === LABEL TEXT: White text on colored background ===
+            ctx.fillStyle = "#ffffff";
             ctx.textAlign = "left";
             ctx.textBaseline = "top";
-            ctx.fillText(rect.label, x + 4, y + 4);
+            ctx.fillText(rect.label, x + 4 + padding, y + 4 + padding / 2);
           }
         }
       } finally {
@@ -128,18 +198,28 @@ class ClusterRectanglesPaneView implements IPrimitivePaneView {
   }
 }
 
+/**
+ * ClusterRectanglesPrimitive - Attachable primitive for LightweightCharts series
+ *
+ * Usage:
+ *   const primitive = new ClusterRectanglesPrimitive();
+ *   candleSeries.attachPrimitive(primitive);
+ *   primitive.setRectangles(clusterRects);
+ */
 export class ClusterRectanglesPrimitive implements ISeriesPrimitive<Time> {
   private _paneView = new ClusterRectanglesPaneView();
   private _rects: ClusterRect[] = [];
   private _series: SeriesAttachedParameter<Time> | null = null;
   private _requestUpdate?: () => void;
 
+  /** Called by LightweightCharts when primitive is attached to a series */
   attached(param: SeriesAttachedParameter<Time>): void {
     this._series = param;
     this._requestUpdate = param.requestUpdate;
     this._paneView.update(this._rects, this._series);
   }
 
+  /** Called by LightweightCharts when primitive is detached */
   detached(): void {
     this._series = null;
     this._requestUpdate = undefined;
@@ -157,13 +237,17 @@ export class ClusterRectanglesPrimitive implements ISeriesPrimitive<Time> {
     return null;
   }
 
+  /** Update the cluster rectangles to display */
   setRectangles(rects: ClusterRect[]): void {
     this._rects = rects;
     this._paneView.update(this._rects, this._series);
+    this._requestUpdate?.();
   }
 
+  /** Clear all cluster rectangles */
   clearRectangles(): void {
     this._rects = [];
     this._paneView.update(this._rects, this._series);
+    this._requestUpdate?.();
   }
 }

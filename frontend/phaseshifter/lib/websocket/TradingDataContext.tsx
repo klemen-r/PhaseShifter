@@ -19,6 +19,8 @@ import {
   isSubscribedMessage,
   isUnsubscribedMessage,
   isErrorMessage,
+  isAutoClustersEnabledMessage,
+  isAutoClustersDisabledMessage,
 } from "./types";
 
 const STORAGE_KEY = "phaseshifter_subscriptions";
@@ -35,6 +37,11 @@ export interface TradingDataContextValue {
   subscribeTicker: (ticker: string) => void;
   unsubscribeTicker: (ticker: string) => void;
   requestClusters: (ticker: string) => void;
+
+  // Auto-clusters management
+  enableAutoClusters: (ticker: string) => void;
+  disableAutoClusters: (ticker: string) => void;
+  isAutoClustersEnabled: (ticker: string) => boolean;
 
   // Data access
   tickerData: Map<string, TickerData>;
@@ -116,6 +123,9 @@ export function TradingDataProvider({
   } | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [maxCandlesPerTicker, setMaxCandlesPerTicker] = useState(maxCandles);
+  const [autoClustersEnabled, setAutoClustersEnabled] = useState<Set<string>>(
+    () => new Set()
+  );
 
   const maxCandlesRef = useRef(maxCandlesPerTicker);
   useEffect(() => {
@@ -205,6 +215,14 @@ export function TradingDataProvider({
           });
         } else if (isErrorMessage(parsed)) {
           setLastError(parsed.message);
+        } else if (isAutoClustersEnabledMessage(parsed)) {
+          setAutoClustersEnabled((prev) => new Set(prev).add(parsed.ticker));
+        } else if (isAutoClustersDisabledMessage(parsed)) {
+          setAutoClustersEnabled((prev) => {
+            const next = new Set(prev);
+            next.delete(parsed.ticker);
+            return next;
+          });
         }
       }
     );
@@ -247,6 +265,27 @@ export function TradingDataProvider({
     [send]
   );
 
+  const enableAutoClusters = useCallback(
+    (ticker: string) => {
+      send({ type: "enable_auto_clusters", ticker });
+    },
+    [send]
+  );
+
+  const disableAutoClusters = useCallback(
+    (ticker: string) => {
+      send({ type: "disable_auto_clusters", ticker });
+    },
+    [send]
+  );
+
+  const isAutoClustersEnabledFn = useCallback(
+    (ticker: string): boolean => {
+      return autoClustersEnabled.has(ticker);
+    },
+    [autoClustersEnabled]
+  );
+
   const getCandles = useCallback(
     (ticker: string): WSCandle[] => {
       return tickerData.get(ticker)?.candles ?? [];
@@ -266,6 +305,9 @@ export function TradingDataProvider({
     subscribeTicker,
     unsubscribeTicker,
     requestClusters,
+    enableAutoClusters,
+    disableAutoClusters,
+    isAutoClustersEnabled: isAutoClustersEnabledFn,
     tickerData,
     getCandles,
     getClusters,

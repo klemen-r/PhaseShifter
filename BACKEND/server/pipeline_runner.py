@@ -108,15 +108,18 @@ class PipelineRunner:
             if result:
                 self._cache[ticker] = result
 
-                # Broadcast to subscribers
-                await self.server.broadcast_to_ticker(
-                    ticker,
-                    {
-                        "type": "clusters",
-                        "ticker": ticker,
-                        "data": result,
-                    },
-                )
+                # Only broadcast to clients with auto-clusters enabled
+                auto_subscribers = self.server.get_auto_cluster_subscribers(ticker)
+                if auto_subscribers:
+                    await self.server.broadcast_to_auto_cluster_clients(
+                        ticker,
+                        {
+                            "type": "clusters",
+                            "ticker": ticker,
+                            "data": result,
+                        },
+                    )
+                    print(f"[Pipeline] Broadcast clusters to {len(auto_subscribers)} auto-cluster clients for {ticker}")
 
             return result
 
