@@ -3,6 +3,8 @@ yfinance data streaming - polls for 1m candles and pushes to subscribers.
 """
 
 import asyncio
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
@@ -13,13 +15,21 @@ if TYPE_CHECKING:
     from ws_server import WebSocketServer
 
 
+@dataclass
+class CachedCandles:
+    """Cached candle data with timestamp for TTL checking."""
+    candles: list[dict]
+    fetched_at: float  # time.time()
+    interval: str      # "1m" or "5m"
+
+
 class DataStreamer:
     PRIMARY_INTERVAL = "1m"
     FALLBACK_INTERVAL = "5m"
     FLAT_RATIO_THRESHOLD = 0.9
     FLAT_MIN_SAMPLES = 30
 
-    def __init__(self, server: "WebSocketServer", poll_interval: int = 60):
+    def __init__(self, server: "WebSocketServer", poll_interval: int = 60, cache_ttl: int = 30):
         self.server = server
         self.poll_interval = poll_interval  # seconds
         self._running = False
@@ -28,6 +38,10 @@ class DataStreamer:
         # Track last candle time per ticker to avoid duplicates
         self._last_candle_time: dict[str, int] = {}
         self._preferred_interval: dict[str, str] = {}
+
+        # Candle cache to avoid redundant yfinance calls
+        self._candle_cache: dict[str, CachedCandles] = {}
+        self._cache_ttl = cache_ttl  # seconds
 
     async def start(self):
         """Start the data streaming loop."""
@@ -83,7 +97,7 @@ class DataStreamer:
                 print(f"[Streamer] Error fetching {ticker}: {e}")
 
     def _fetch_latest_candles(self, ticker: str) -> list[dict]:
-        """Fetch latest 1m candles from yfinance."""
+        """Fetch latest 1m candles from yfinance and update cache."""
         try:
             interval = self._preferred_interval.get(ticker, self.PRIMARY_INTERVAL)
             data = self._download_data(ticker, period="1d", interval=interval)
@@ -93,16 +107,13 @@ class DataStreamer:
             if data.empty:
                 return []
 
-            candles = []
+            all_candles = []
+            new_candles = []
             last_time = self._last_candle_time.get(ticker, 0)
 
             for idx, row in data.iterrows():
                 # Convert timestamp to milliseconds
                 ts = int(idx.timestamp() * 1000)
-
-                # Skip if we've already sent this candle
-                if ts <= last_time:
-                    continue
 
                 candle = {
                     "time": ts,
@@ -112,13 +123,18 @@ class DataStreamer:
                     "close": float(row["Close"]),
                     "volume": int(row["Volume"]) if pd.notna(row["Volume"]) else 0,
                 }
-                candles.append(candle)
+                all_candles.append(candle)
 
-                # Update last candle time
+                # Only add to new_candles if after last sent time
                 if ts > last_time:
+                    new_candles.append(candle)
                     self._last_candle_time[ticker] = ts
 
-            return candles
+            # Update cache with all candles (keeps cache fresh for new subscribers)
+            if all_candles:
+                self._set_cached_candles(ticker, all_candles, interval)
+
+            return new_candles
 
         except Exception as e:
             print(f"[Streamer] yfinance error for {ticker}: {e}")
@@ -126,29 +142,73 @@ class DataStreamer:
 
     def get_status(self) -> dict:
         """Get streamer status."""
+        cache_info = {}
+        now = time.time()
+        for ticker, cached in self._candle_cache.items():
+            age = now - cached.fetched_at
+            cache_info[ticker] = {
+                "candles": len(cached.candles),
+                "interval": cached.interval,
+                "age_seconds": round(age, 1),
+                "valid": age <= self._cache_ttl,
+            }
+
         return {
             "running": self._running,
             "poll_interval": self.poll_interval,
+            "cache_ttl": self._cache_ttl,
             "active_tickers": list(self.server.get_all_subscribed_tickers()),
             "tracked_tickers": list(self._last_candle_time.keys()),
+            "cache": cache_info,
         }
+
+    def clear_cache(self, ticker: str | None = None):
+        """Clear candle cache. If ticker is None, clears all."""
+        if ticker is None:
+            self._candle_cache.clear()
+        elif ticker in self._candle_cache:
+            del self._candle_cache[ticker]
 
     def reset_ticker(self, ticker: str):
         """Reset tracking for a ticker (will resend all candles)."""
         if ticker in self._last_candle_time:
             del self._last_candle_time[ticker]
+        if ticker in self._candle_cache:
+            del self._candle_cache[ticker]
+
+    def _get_cached_candles(self, ticker: str) -> list[dict] | None:
+        """Return cached candles if valid, None if expired/missing."""
+        cached = self._candle_cache.get(ticker)
+        if cached is None:
+            return None
+        age = time.time() - cached.fetched_at
+        if age > self._cache_ttl:
+            return None
+        return cached.candles
+
+    def _set_cached_candles(self, ticker: str, candles: list[dict], interval: str):
+        """Store candles in cache with current timestamp."""
+        self._candle_cache[ticker] = CachedCandles(
+            candles=candles,
+            fetched_at=time.time(),
+            interval=interval,
+        )
 
     async def send_initial_data(self, client_id: str, ticker: str):
         """Fetch and send historical candles to a newly subscribed client."""
         loop = asyncio.get_event_loop()
 
         try:
+            # Check if we'll hit cache before fetching
+            from_cache = self._get_cached_candles(ticker) is not None
+
             candles = await loop.run_in_executor(
                 None, lambda: self._fetch_all_candles(ticker)
             )
 
             if candles:
-                print(f"    → Sending {len(candles)} initial candles to {client_id}")
+                source = "cached" if from_cache else "fetched"
+                print(f"    → Sending {len(candles)} initial candles to {client_id} ({source})")
                 for candle in candles:
                     await self.server.send_to_client(
                         client_id,
@@ -165,7 +225,12 @@ class DataStreamer:
             print(f"[Streamer] Error sending initial data for {ticker}: {e}")
 
     def _fetch_all_candles(self, ticker: str) -> list[dict]:
-        """Fetch all available 1m candles from yfinance (1 day)."""
+        """Fetch all available 1m candles from yfinance (1 day), using cache if valid."""
+        # Check cache first
+        cached = self._get_cached_candles(ticker)
+        if cached is not None:
+            return cached
+
         try:
             interval = self._preferred_interval.get(ticker, self.PRIMARY_INTERVAL)
             data = self._download_data(ticker, period="1d", interval=interval)
@@ -194,6 +259,10 @@ class DataStreamer:
                     or ts > self._last_candle_time[ticker]
                 ):
                     self._last_candle_time[ticker] = ts
+
+            # Cache the fetched candles
+            if candles:
+                self._set_cached_candles(ticker, candles, interval)
 
             return candles
 

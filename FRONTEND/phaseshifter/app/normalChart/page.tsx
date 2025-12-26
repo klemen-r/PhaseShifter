@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Settings } from "lucide-react";
 
 import { AppSidebar } from "@/components/AppSidebar";
 import { CustomTrigger } from "@/components/customSideBarTrigger";
@@ -12,8 +13,7 @@ import { useSidebar } from "@/components/ui/sidebar";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { calculateDonchianMidpoint, type Candle } from "@/lib/calcDonchianMid";
-import { parseCsvToCandles } from "@/lib/parseCsv";
-import { ExtraSettingsDialog } from "@/components/nchartS";
+import { ExtraSettingsDialog, type ChartSettingsData, type SavedPreset } from "@/components/nchartS";
 import {
   useTradingData,
   type WSCandle,
@@ -47,13 +47,6 @@ function wsCandiesToChartCandles(wsCandles: WSCandle[]): Candle[] {
   }));
 }
 
-const sampleData: Candle[] = [
-  { time: "2024-11-18", open: 100, high: 110, low: 95, close: 105 },
-  { time: "2024-11-19", open: 105, high: 112, low: 101, close: 108 },
-  { time: "2024-11-20", open: 108, high: 115, low: 107, close: 112 },
-  { time: "2024-11-21", open: 112, high: 118, low: 110, close: 116 },
-  { time: "2024-11-22", open: 116, high: 120, low: 113, close: 114 },
-];
 
 type LineSettings = {
   lineColor: string;
@@ -70,7 +63,6 @@ export default function NormalChartPage() {
   const { open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const [showMidpoint, setShowMidpoint] = useState(true);
   const [phase, setPhaseAmount] = useState(5);
-  const [csvData, setCsvData] = useState<Candle[]>(sampleData);
   const [settings, setSettings] = useState<LineSettings>({
     lineColor: "#A06BF3",
     bgUpColor: "#006400",
@@ -83,12 +75,68 @@ export default function NormalChartPage() {
   });
   const [extraOpen, setExtraOpen] = useState(false);
 
-  // WebSocket data source
-  const [dataSource, setDataSource] = useState<"csv" | "websocket">("csv");
-  const [wsTicker, setWsTicker] = useState("NQ=F");
+  // Ticker input (what user types) vs active ticker (what's displayed)
+  const [tickerInput, setTickerInput] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("lastTicker") || "NQ=F";
+    }
+    return "NQ=F";
+  });
+  const [activeTicker, setActiveTicker] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("lastTicker") || "NQ=F";
+    }
+    return "NQ=F";
+  });
 
   // Cluster display settings
   const [clusterOpacity, setClusterOpacity] = useState(25); // 10-80%
+  const [clusterBullishColor, setClusterBullishColor] = useState("#22c55e");
+  const [clusterBearishColor, setClusterBearishColor] = useState("#ef4444");
+  const [clusterBorderColor, setClusterBorderColor] = useState("#ffffff");
+  const [clusterBorderStyle, setClusterBorderStyle] = useState<"solid" | "dashed" | "none">("dashed");
+
+  // Saved presets
+  const [savedPresets, setSavedPresets] = useState<SavedPreset[]>([]);
+
+  // Fetch saved presets from API
+  const fetchPresets = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chart-settings");
+      if (res.ok) {
+        const data = await res.json();
+        setSavedPresets(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch presets:", err);
+    }
+  }, []);
+
+  // Apply a preset's settings
+  const applyPreset = useCallback((preset: ChartSettingsData) => {
+    setPhaseAmount(preset.phaseAmount);
+    setShowMidpoint(preset.showMidpoint);
+    setClusterOpacity(preset.clusterOpacity);
+    setClusterBullishColor(preset.clusterBullishColor);
+    setClusterBearishColor(preset.clusterBearishColor);
+    setClusterBorderColor(preset.clusterBorderColor);
+    setClusterBorderStyle(preset.clusterBorderStyle);
+    setSettings({
+      lineColor: preset.lineColor,
+      bgUpColor: preset.bgUpColor,
+      bgDownColor: preset.bgDownColor,
+      transparency: preset.transparency,
+      candleUpColor: preset.candleUpColor,
+      candleDownColor: preset.candleDownColor,
+      candleBorderUp: preset.candleBorderUp,
+      candleBorderDown: preset.candleBorderDown,
+    });
+  }, []);
+
+  // Load presets on mount
+  useEffect(() => {
+    fetchPresets();
+  }, [fetchPresets]);
 
   const {
     status: wsStatus,
@@ -115,63 +163,37 @@ export default function NormalChartPage() {
     candleBorderDown,
   } = settings;
 
+  // Track if we've auto-requested data on first chart click
+  const hasAutoRequested = useRef(false);
+
+  // Auto-subscribe to remembered ticker when WebSocket connects
+  useEffect(() => {
+    if (wsStatus === "open" && wsTicker && !subscribedTickers.has(wsTicker)) {
+      subscribeTicker(wsTicker);
+      localStorage.setItem("lastTicker", wsTicker);
+    }
+  }, [wsStatus, wsTicker, subscribedTickers, subscribeTicker]);
+
   const handleChartFocus = useCallback(() => {
     if (open) setOpen(false);
     if (openMobile) setOpenMobile(false);
-  }, [open, openMobile, setOpen, setOpenMobile]);
 
-  // Load CSV data
-  useEffect(() => {
-    let active = true;
-
-    const loadCsv = async () => {
-      try {
-        const paths = ["/nq_5m.csv"];
-        let text: string | null = null;
-
-        for (const path of paths) {
-          const res = await fetch(path, { cache: "no-store" });
-          if (res.ok) {
-            text = await res.text();
-            break;
-          }
-        }
-
-        if (!text) throw new Error("Failed to load CSV data");
-
-        const parsed = parseCsvToCandles(text);
-        if (active && parsed.length > 0) {
-          setCsvData(parsed);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-
-    loadCsv();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  // Subscribe to ticker when switching to WebSocket mode
-  useEffect(() => {
-    if (dataSource === "websocket" && wsStatus === "open") {
+    // Auto-subscribe and request data on first chart interaction
+    if (!hasAutoRequested.current && wsStatus === "open") {
+      hasAutoRequested.current = true;
       if (!subscribedTickers.has(wsTicker)) {
         subscribeTicker(wsTicker);
+        localStorage.setItem("lastTicker", wsTicker);
       }
+      requestClusters(wsTicker);
     }
-  }, [dataSource, wsStatus, subscribedTickers, subscribeTicker]);
+  }, [open, openMobile, setOpen, setOpenMobile, wsStatus, subscribedTickers, wsTicker, subscribeTicker, requestClusters]);
 
-  // Compute chart data based on source
+  // Compute chart data from WebSocket
   // Include lastCandle in deps to trigger updates when new candles arrive
   const chartData = useMemo(() => {
-    if (dataSource === "csv") {
-      return csvData;
-    }
     return wsCandiesToChartCandles(getCandles(wsTicker));
-  }, [dataSource, csvData, getCandles, lastCandle]);
+  }, [getCandles, wsTicker, lastCandle]);
 
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -187,8 +209,16 @@ export default function NormalChartPage() {
               <h2 className="text-base font-semibold text-zinc-100">
                 Price Chart
               </h2>
-              <div className="text-xs text-zinc-400">
-                {dataSource === "csv" ? "CSV File" : `WS: ${wsTicker}`}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-400">{wsTicker}</span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={() => setExtraOpen(true)}
+                >
+                  <Settings className="h-4 w-4 text-zinc-400" />
+                </Button>
               </div>
             </div>
 
@@ -205,220 +235,150 @@ export default function NormalChartPage() {
                 candleDownColor={candleDownColor}
                 candleBorderUp={candleBorderUp}
                 candleBorderDown={candleBorderDown}
-                clusters={
-                  dataSource === "websocket" ? getClusters(wsTicker) : null
-                }
+                clusters={getClusters(wsTicker)}
                 clusterOpacity={clusterOpacity}
+                clusterBullishColor={clusterBullishColor}
+                clusterBearishColor={clusterBearishColor}
+                clusterBorderColor={clusterBorderColor}
+                clusterBorderStyle={clusterBorderStyle}
               />
             </div>
           </div>
         </div>
 
         <div className="w-[360px] space-y-4">
-          {/* Data Source Card */}
+          {/* Connection Card */}
           <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur">
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Data Source</CardTitle>
+              <CardTitle className="text-base">Connection</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex gap-2">
-                <Button
-                  variant={dataSource === "csv" ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => setDataSource("csv")}
-                  className="flex-1"
-                >
-                  CSV File
-                </Button>
-                <Button
-                  variant={dataSource === "websocket" ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => setDataSource("websocket")}
-                  className="flex-1"
-                >
-                  WebSocket
-                </Button>
-              </div>
-
-              {dataSource === "websocket" && (
-                <div className="space-y-3">
-                  <Label htmlFor="wsTicker">Ticker</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="wsTicker"
-                      value={wsTicker}
-                      onChange={(e) =>
-                        setWsTicker(e.target.value.toUpperCase())
-                      }
-                      placeholder="NQ=F"
-                      className="font-mono"
-                    />
-                    {subscribedTickers.has(wsTicker) ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => unsubscribeTicker(wsTicker)}
-                      >
-                        Unsub
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => subscribeTicker(wsTicker)}
-                        disabled={wsStatus !== "open"}
-                      >
-                        Sub
-                      </Button>
-                    )}
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2 text-xs">
-                      <Badge
-                        variant="outline"
-                        className={
-                          wsStatus === "open"
-                            ? "text-emerald-400 border-emerald-400/30"
-                            : wsStatus === "connecting"
-                              ? "text-amber-400 border-amber-400/30"
-                              : "text-zinc-400 border-zinc-400/30"
-                        }
-                      >
-                        {wsStatus}
-                      </Badge>
-                      <span className="text-zinc-400">
-                        {getCandles(wsTicker).length} candles
-                      </span>
-                    </div>
-                    {wsStatus !== "open" && (
-                      <div className="text-xs text-amber-400">
-                        Server not connected. Start the server with: python
-                        main.py
-                      </div>
-                    )}
-                    {wsStatus === "open" &&
-                      getCandles(wsTicker).length === 0 &&
-                      subscribedTickers.has(wsTicker) && (
-                        <div className="text-xs text-zinc-500">
-                          Waiting for candles... (server polls every 60s)
-                        </div>
-                      )}
-                  </div>
-                  <Separator className="bg-zinc-800" />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full"
-                    onClick={() => requestClusters(wsTicker)}
-                    disabled={wsStatus !== "open"}
-                  >
-                    Get Clusters
-                  </Button>
-
-                  {/* Auto-fetch toggle - only show if we have clusters */}
-                  {getClusters(wsTicker) && (
-                    <div className="flex items-center justify-between pt-2">
-                      <Label className="text-sm text-zinc-200">
-                        Auto-refresh (5 min)
-                      </Label>
-                      <Switch
-                        checked={isAutoClustersEnabled(wsTicker)}
-                        onCheckedChange={(checked) => {
-                          if (checked) {
-                            enableAutoClusters(wsTicker);
-                          } else {
-                            disableAutoClusters(wsTicker);
-                          }
-                        }}
-                        disabled={wsStatus !== "open"}
-                      />
-                    </div>
+              <div className="space-y-3">
+                <Label htmlFor="wsTicker">Ticker</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="wsTicker"
+                    value={wsTicker}
+                    onChange={(e) =>
+                      setWsTicker(e.target.value.toUpperCase())
+                    }
+                    placeholder="NQ=F"
+                    className="font-mono"
+                  />
+                  {subscribedTickers.has(wsTicker) ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => unsubscribeTicker(wsTicker)}
+                    >
+                      Unsub
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        subscribeTicker(wsTicker);
+                        localStorage.setItem("lastTicker", wsTicker);
+                      }}
+                      disabled={wsStatus !== "open"}
+                    >
+                      Sub
+                    </Button>
                   )}
                 </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Chart Settings Card */}
-          <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur">
-            <CardHeader className="">
-              <CardTitle className="text-base">Chart Settings</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <Label htmlFor="phase">Phase Window</Label>
-              <Input
-                id="phase"
-                type="number"
-                min={1}
-                value={phase}
-                onChange={(e) => setPhaseAmount(Number(e.target.value) || 1)}
-              />
-              <Separator className="bg-zinc-800" />
-
-              <div className="flex items-center justify-between">
-                <Label className="text-sm text-zinc-200">Auto-scale</Label>
-                <Switch defaultChecked />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <Label className="text-sm text-zinc-200">
-                  Show midpoint line
-                </Label>
-                <Switch
-                  checked={showMidpoint}
-                  onCheckedChange={setShowMidpoint}
-                />
-              </div>
-
-              {/* Cluster Opacity - only shown in WebSocket mode */}
-              {dataSource === "websocket" && (
-                <>
-                  <Separator className="bg-zinc-800" />
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm text-zinc-200">
-                        Cluster Opacity
-                      </Label>
-                      <span className="text-xs text-zinc-400">
-                        {clusterOpacity}%
-                      </span>
-                    </div>
-                    <Input
-                      type="range"
-                      min={10}
-                      max={80}
-                      value={clusterOpacity}
-                      onChange={(e) =>
-                        setClusterOpacity(Number(e.target.value))
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-xs">
+                    <Badge
+                      variant="outline"
+                      className={
+                        wsStatus === "open"
+                          ? "text-emerald-400 border-emerald-400/30"
+                          : wsStatus === "connecting"
+                            ? "text-amber-400 border-amber-400/30"
+                            : "text-zinc-400 border-zinc-400/30"
                       }
+                    >
+                      {wsStatus}
+                    </Badge>
+                    <span className="text-zinc-400">
+                      {getCandles(wsTicker).length} candles
+                    </span>
+                  </div>
+                  {wsStatus !== "open" && (
+                    <div className="text-xs text-amber-400">
+                      Server not connected. Start the server with: python
+                      main.py
+                    </div>
+                  )}
+                  {wsStatus === "open" &&
+                    getCandles(wsTicker).length === 0 &&
+                    subscribedTickers.has(wsTicker) && (
+                      <div className="text-xs text-zinc-500">
+                        Waiting for candles... (server polls every 60s)
+                      </div>
+                    )}
+                </div>
+                <Separator className="bg-zinc-800" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => requestClusters(wsTicker)}
+                  disabled={wsStatus !== "open"}
+                >
+                  Get Clusters
+                </Button>
+
+                {/* Auto-fetch toggle - only show if we have clusters */}
+                {getClusters(wsTicker) && (
+                  <div className="flex items-center justify-between pt-2">
+                    <Label className="text-sm text-zinc-200">
+                      Auto-refresh (5 min)
+                    </Label>
+                    <Switch
+                      checked={isAutoClustersEnabled(wsTicker)}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          enableAutoClusters(wsTicker);
+                        } else {
+                          disableAutoClusters(wsTicker);
+                        }
+                      }}
+                      disabled={wsStatus !== "open"}
                     />
                   </div>
-                </>
-              )}
-
-              <Separator className="bg-zinc-800" />
-
-              <Button
-                variant="secondary"
-                className="w-full justify-center"
-                onClick={() => setExtraOpen(true)}
-              >
-                Extra settings
-              </Button>
+                )}
+              </div>
             </CardContent>
           </Card>
 
-          {/* Clusters Display - only when in websocket mode */}
-          {dataSource === "websocket" && (
-            <div className="max-h-[calc(100vh-777px)]">
-              <ClustersDisplay ticker={wsTicker} data={getClusters(wsTicker)} />
-            </div>
-          )}
+          {/* Clusters Display */}
+          <div className="max-h-[calc(100vh-420px)]">
+            <ClustersDisplay ticker={wsTicker} data={getClusters(wsTicker)} />
+          </div>
         </div>
       </div>
       <ExtraSettingsDialog
         open={extraOpen}
         onOpenChange={setExtraOpen}
+        // Chart behavior
+        phaseAmount={phase}
+        setPhaseAmount={setPhaseAmount}
+        showMidpoint={showMidpoint}
+        setShowMidpoint={setShowMidpoint}
+        // Cluster colors
+        clusterOpacity={clusterOpacity}
+        setClusterOpacity={setClusterOpacity}
+        clusterBullishColor={clusterBullishColor}
+        setClusterBullishColor={setClusterBullishColor}
+        clusterBearishColor={clusterBearishColor}
+        setClusterBearishColor={setClusterBearishColor}
+        clusterBorderColor={clusterBorderColor}
+        setClusterBorderColor={setClusterBorderColor}
+        clusterBorderStyle={clusterBorderStyle}
+        setClusterBorderStyle={setClusterBorderStyle}
+        // Midpoint colors
         lineColor={lineColor}
         setLineColor={(val) =>
           setSettings((prev) => ({ ...prev, lineColor: val }))
@@ -435,6 +395,7 @@ export default function NormalChartPage() {
         setTransparency={(val) =>
           setSettings((prev) => ({ ...prev, transparency: val }))
         }
+        // Candle colors
         candleUpColor={candleUpColor}
         setCandleUpColor={(val) =>
           setSettings((prev) => ({ ...prev, candleUpColor: val }))
@@ -451,6 +412,10 @@ export default function NormalChartPage() {
         setCandleBorderDown={(val) =>
           setSettings((prev) => ({ ...prev, candleBorderDown: val }))
         }
+        // Presets
+        savedPresets={savedPresets}
+        onRefreshPresets={fetchPresets}
+        onApplyPreset={applyPreset}
       />
     </div>
   );
@@ -470,6 +435,10 @@ type Props = {
   candleBorderDown: string;
   clusters?: ClustersData | null;
   clusterOpacity?: number; // 10-80%, controls cluster rectangle transparency
+  clusterBullishColor?: string;
+  clusterBearishColor?: string;
+  clusterBorderColor?: string;
+  clusterBorderStyle?: "solid" | "dashed" | "none";
 };
 
 const colorWithAlpha = (hex: string, alpha: number) => {
@@ -497,6 +466,10 @@ export function PriceChart({
   candleBorderDown,
   clusters,
   clusterOpacity = 25,
+  clusterBullishColor = "#22c55e",
+  clusterBearishColor = "#ef4444",
+  clusterBorderColor = "#ffffff",
+  clusterBorderStyle = "dashed",
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -647,6 +620,15 @@ export function PriceChart({
       return;
     }
 
+    // Helper to convert hex to RGB string
+    const hexToRgb = (hex: string): string => {
+      const normalized = hex.startsWith("#") ? hex.slice(1) : hex;
+      const r = parseInt(normalized.slice(0, 2), 16);
+      const g = parseInt(normalized.slice(2, 4), 16);
+      const b = parseInt(normalized.slice(4, 6), 16);
+      return `${r}, ${g}, ${b}`;
+    };
+
     // Use the first candle time as the start time for rectangles
     const firstCandle = data[0];
     const startTime = (
@@ -660,9 +642,9 @@ export function PriceChart({
 
     const rects: ClusterRect[] = clusters.clusters.map((cluster, idx) => {
       const isBullish = cluster.side === "bullish";
-      // === COLOR: RGB values for cluster fill ===
-      // Green (34, 197, 94) for bullish, Red (239, 68, 68) for bearish
-      const baseColor = isBullish ? "34, 197, 94" : "239, 68, 68";
+      const baseColor = isBullish
+        ? hexToRgb(clusterBullishColor)
+        : hexToRgb(clusterBearishColor);
       const label = `${isBullish ? "▲" : "▼"} ${cluster.count} (${cluster.unique_scenarios} scenarios)`;
 
       return {
@@ -670,15 +652,16 @@ export function PriceChart({
         low: cluster.low,
         high: cluster.high,
         startTime,
-        // === COLOR: Fill with configurable opacity from slider ===
         color: `rgba(${baseColor}, ${opacity})`,
         side: cluster.side,
         label,
+        borderColor: clusterBorderColor,
+        borderStyle: clusterBorderStyle,
       };
     });
 
     clusterPrimitiveRef.current.setRectangles(rects);
-  }, [clusters, data, clusterOpacity]);
+  }, [clusters, data, clusterOpacity, clusterBullishColor, clusterBearishColor, clusterBorderColor, clusterBorderStyle]);
 
   return (
     <div className="absolute inset-0 h-full w-full min-h-[480px]">

@@ -25,6 +25,8 @@ import type {
   Coordinate,
 } from "lightweight-charts";
 
+export type ClusterBorderStyle = "solid" | "dashed" | "none";
+
 export interface ClusterRect {
   id: string;
   low: number;
@@ -34,6 +36,10 @@ export interface ClusterRect {
   color: string;
   side: "bullish" | "bearish";
   label?: string;
+  /** Border color override (defaults to side-based color if not provided) */
+  borderColor?: string;
+  /** Border style: solid, dashed, or none */
+  borderStyle?: ClusterBorderStyle;
 }
 
 interface SeriesApi {
@@ -103,9 +109,10 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
           const borderRadius = Math.min(4, height / 2, width / 2);
           const isBullish = rect.side === "bullish";
 
-          // === COLOR: Border color based on cluster side ===
-          // Green (#22c55e) for bullish targets, Red (#ef4444) for bearish targets
-          const borderColor = isBullish ? "#22c55e" : "#ef4444";
+          // === COLOR: Border color (custom or side-based default) ===
+          const defaultBorderColor = isBullish ? "#22c55e" : "#ef4444";
+          const borderColor = rect.borderColor || defaultBorderColor;
+          const borderStyle = rect.borderStyle || "dashed";
 
           // === FILL: Semi-transparent rectangle background ===
           // Color comes from rect.color which includes opacity (e.g. "rgba(34, 197, 94, 0.25)")
@@ -115,9 +122,11 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
           ctx.fillStyle = rect.color;
           ctx.fill();
 
+          // Skip border rendering if style is "none"
+          if (borderStyle === "none") continue;
+
           // === LEFT BORDER: Colored accent line (2px) ===
           // Thicker border on left edge to highlight cluster zone boundary
-          // Uses same green/red color scheme based on bullish/bearish side
           ctx.beginPath();
           ctx.moveTo(x + borderRadius, y);
           ctx.lineTo(x, y + borderRadius);
@@ -127,19 +136,21 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
           ctx.lineWidth = 2;
           ctx.stroke();
 
-          // === DASHED BORDERS: Top and bottom horizontal lines ===
-          // Subtle dashed lines at 50% opacity (globalAlpha = 0.5)
-          // Dash pattern: 4px on, 4px off
-          // Extends from left edge to right edge of chart
+          // === TOP/BOTTOM BORDERS: Horizontal lines ===
+          // Style based on borderStyle setting (solid or dashed)
           ctx.beginPath();
-          ctx.setLineDash([4, 4]);
+          if (borderStyle === "dashed") {
+            ctx.setLineDash([4, 4]);
+          } else {
+            ctx.setLineDash([]);
+          }
           ctx.moveTo(x + borderRadius, y);
           ctx.lineTo(x + width, y);
           ctx.moveTo(x + borderRadius, y + height);
           ctx.lineTo(x + width, y + height);
           ctx.strokeStyle = borderColor;
           ctx.lineWidth = 1;
-          ctx.globalAlpha = 0.5;
+          ctx.globalAlpha = borderStyle === "dashed" ? 0.5 : 0.8;
           ctx.stroke();
           ctx.setLineDash([]);
           ctx.globalAlpha = 1;
