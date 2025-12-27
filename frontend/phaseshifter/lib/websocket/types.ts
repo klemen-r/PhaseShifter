@@ -36,7 +36,7 @@ export interface WebSocketContextValue {
   messages: WSMessage[];
   subscribe: (
     filter: MessageFilter,
-    callback: (msg: WSMessage) => void
+    callback: (msg: WSMessage) => void,
   ) => () => void;
   clearMessages: (connectionId?: string) => void;
 
@@ -50,7 +50,7 @@ export const DEFAULT_CONNECTION_ID = "default";
 export const DEFAULT_RECONNECT_INTERVAL_MS = 1500;
 
 // ============================================
-// Server Message Types
+// Server Message Types (Rust phaseshifter-server)
 // ============================================
 
 export interface WSCandle {
@@ -60,6 +60,14 @@ export interface WSCandle {
   low: number;
   close: number;
   volume: number;
+}
+
+export interface WSTick {
+  price: number;
+  volume: number;
+  timestamp: number; // Unix timestamp in milliseconds
+  bid?: number;
+  ask?: number;
 }
 
 export interface ClusterItem {
@@ -87,7 +95,121 @@ export interface ClustersData {
   generated_at: string;
 }
 
-// Server → Client messages
+export interface OpenNodeInfo {
+  direction: string;
+  distance_pct: number;
+  anchor: number;
+  extreme: number;
+  created_at: number;
+  projected_target: number;
+}
+
+export interface HistoryBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+// Server → Client messages (Rust server format)
+export interface ConnectedMessage {
+  type: "connected";
+  client_id: number;
+  symbols: string[];
+}
+
+export interface TickMessage {
+  type: "tick";
+  symbol: string;
+  price: number;
+  volume: number;
+  timestamp: number;
+  bid: number;
+  ask: number;
+}
+
+export interface BarUpdateMessage {
+  type: "bar_update";
+  symbol: string;
+  timeframe: string;
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface BarClosedMessage {
+  type: "bar_closed";
+  symbol: string;
+  timeframe: string;
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface PhaseUpdateMessage {
+  type: "phase_update";
+  symbol: string;
+  timeframe: string;
+  time: number;
+  phase: "bullish" | "bearish";
+  anchor: number;
+  dm: number;
+}
+
+export interface NodeCreatedMessage {
+  type: "node_created";
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  distance_pct: number;
+  anchor: number;
+  extreme: number;
+  created_at: number;
+}
+
+export interface NodeClosedMessage {
+  type: "node_closed";
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  distance_pct: number;
+  target: number;
+  closed_at: number;
+}
+
+export interface OpenNodesMessage {
+  type: "open_nodes";
+  symbol: string;
+  timeframe: string;
+  nodes: OpenNodeInfo[];
+}
+
+export interface HistoryMessage {
+  type: "history";
+  symbol: string;
+  timeframe: string;
+  bars: HistoryBar[];
+}
+
+export interface ErrorMessage {
+  type: "error";
+  message: string;
+}
+
+export interface PongMessage {
+  type: "pong";
+  timestamp: number;
+}
+
+// Legacy message types (for backwards compatibility with Python server)
 export interface CandleMessage {
   type: "candle";
   ticker: string;
@@ -110,15 +232,6 @@ export interface UnsubscribedMessage {
   ticker: string;
 }
 
-export interface ErrorMessage {
-  type: "error";
-  message: string;
-}
-
-export interface PongMessage {
-  type: "pong";
-}
-
 export interface AutoClustersEnabledMessage {
   type: "auto_clusters_enabled";
   ticker: string;
@@ -130,16 +243,108 @@ export interface AutoClustersDisabledMessage {
 }
 
 export type ServerMessage =
+  // Rust server messages
+  | ConnectedMessage
+  | TickMessage
+  | BarUpdateMessage
+  | BarClosedMessage
+  | PhaseUpdateMessage
+  | NodeCreatedMessage
+  | NodeClosedMessage
+  | OpenNodesMessage
+  | HistoryMessage
+  | ErrorMessage
+  | PongMessage
+  // Legacy Python server messages
   | CandleMessage
   | ClustersMessage
   | SubscribedMessage
   | UnsubscribedMessage
-  | ErrorMessage
-  | PongMessage
   | AutoClustersEnabledMessage
   | AutoClustersDisabledMessage;
 
 // Type guards
+export function isConnectedMessage(msg: unknown): msg is ConnectedMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "connected"
+  );
+}
+
+export function isTickMessage(msg: unknown): msg is TickMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "tick"
+  );
+}
+
+export function isBarUpdateMessage(msg: unknown): msg is BarUpdateMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "bar_update"
+  );
+}
+
+export function isBarClosedMessage(msg: unknown): msg is BarClosedMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "bar_closed"
+  );
+}
+
+export function isPhaseUpdateMessage(msg: unknown): msg is PhaseUpdateMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "phase_update"
+  );
+}
+
+export function isNodeCreatedMessage(msg: unknown): msg is NodeCreatedMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "node_created"
+  );
+}
+
+export function isNodeClosedMessage(msg: unknown): msg is NodeClosedMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "node_closed"
+  );
+}
+
+export function isOpenNodesMessage(msg: unknown): msg is OpenNodesMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "open_nodes"
+  );
+}
+
+export function isHistoryMessage(msg: unknown): msg is HistoryMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "history"
+  );
+}
+
 export function isCandleMessage(msg: unknown): msg is CandleMessage {
   return (
     typeof msg === "object" &&
@@ -167,7 +372,9 @@ export function isSubscribedMessage(msg: unknown): msg is SubscribedMessage {
   );
 }
 
-export function isUnsubscribedMessage(msg: unknown): msg is UnsubscribedMessage {
+export function isUnsubscribedMessage(
+  msg: unknown,
+): msg is UnsubscribedMessage {
   return (
     typeof msg === "object" &&
     msg !== null &&
@@ -185,8 +392,17 @@ export function isErrorMessage(msg: unknown): msg is ErrorMessage {
   );
 }
 
+export function isPongMessage(msg: unknown): msg is PongMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    (msg as { type: unknown }).type === "pong"
+  );
+}
+
 export function isAutoClustersEnabledMessage(
-  msg: unknown
+  msg: unknown,
 ): msg is AutoClustersEnabledMessage {
   return (
     typeof msg === "object" &&
@@ -197,7 +413,7 @@ export function isAutoClustersEnabledMessage(
 }
 
 export function isAutoClustersDisabledMessage(
-  msg: unknown
+  msg: unknown,
 ): msg is AutoClustersDisabledMessage {
   return (
     typeof msg === "object" &&
@@ -212,16 +428,28 @@ export function parseServerMessage(data: unknown): ServerMessage | null {
     return null;
   }
   const type = (data as { type: unknown }).type;
-  if (
-    type === "candle" ||
-    type === "clusters" ||
-    type === "subscribed" ||
-    type === "unsubscribed" ||
-    type === "error" ||
-    type === "pong" ||
-    type === "auto_clusters_enabled" ||
-    type === "auto_clusters_disabled"
-  ) {
+  const validTypes = [
+    // Rust server messages
+    "connected",
+    "tick",
+    "bar_update",
+    "bar_closed",
+    "phase_update",
+    "node_created",
+    "node_closed",
+    "open_nodes",
+    "history",
+    "error",
+    "pong",
+    // Legacy Python server messages
+    "candle",
+    "clusters",
+    "subscribed",
+    "unsubscribed",
+    "auto_clusters_enabled",
+    "auto_clusters_disabled",
+  ];
+  if (validTypes.includes(type as string)) {
     return data as ServerMessage;
   }
   return null;

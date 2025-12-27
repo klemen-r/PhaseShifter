@@ -1,7 +1,8 @@
 ########################
-# Rust (backend core)
+# Rust (backend)
 ########################
 /BACKEND/phaseshifter-core/target/
+/BACKEND/phaseshifter-server/target/
 /target/
 /*.rs.bk
 
@@ -60,6 +61,7 @@ pinescript_clusters.json
 ########################
 .DS_Store
 Thumbs.db
+nul
 
 ########################
 # Editors / IDE

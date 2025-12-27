@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Settings } from "lucide-react";
 
 import { AppSidebar } from "@/components/AppSidebar";
 import { CustomTrigger } from "@/components/customSideBarTrigger";
@@ -13,9 +14,14 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { calculateDonchianMidpoint, type Candle } from "@/lib/calcDonchianMid";
 import { parseCsvToCandles } from "@/lib/parseCsv";
-import { ExtraSettingsDialog } from "@/components/nchartS";
+import {
+  ExtraSettingsDialog,
+  type ChartSettingsData,
+  type SavedPreset,
+} from "@/components/nchartS";
 import {
   useTradingData,
+  isSierraSymbol,
   type WSCandle,
   type ClustersData,
 } from "@/lib/websocket";
@@ -83,25 +89,92 @@ export default function NormalChartPage() {
   });
   const [extraOpen, setExtraOpen] = useState(false);
 
-  // WebSocket data source
-  const [dataSource, setDataSource] = useState<"csv" | "websocket">("csv");
-  const [wsTicker, setWsTicker] = useState("NQ=F");
+  // WebSocket data source - default to websocket mode
+  const [dataSource, setDataSource] = useState<"csv" | "websocket">(
+    "websocket",
+  );
+
+  // Ticker with localStorage persistence
+  const [wsTicker, setWsTicker] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("phaseshifter_ticker") || "NQ";
+    }
+    return "NQ";
+  });
+
+  // Save ticker to localStorage when it changes
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("phaseshifter_ticker", wsTicker);
+    }
+  }, [wsTicker]);
+
+  // Determine if current ticker uses Sierra/Rust server
+  const isSierra = useMemo(() => isSierraSymbol(wsTicker), [wsTicker]);
 
   // Cluster display settings
   const [clusterOpacity, setClusterOpacity] = useState(25); // 10-80%
+  const [clusterBullishColor, setClusterBullishColor] = useState("#22c55e");
+  const [clusterBearishColor, setClusterBearishColor] = useState("#ef4444");
+  const [clusterBorderColor, setClusterBorderColor] = useState("#ffffff");
+  const [clusterBorderStyle, setClusterBorderStyle] = useState<
+    "solid" | "dashed" | "none"
+  >("dashed");
+
+  // Preset management
+  const [savedPresets, setSavedPresets] = useState<SavedPreset[]>([]);
+
+  // Fetch presets from API
+  const fetchPresets = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chart-settings");
+      if (res.ok) {
+        const data = await res.json();
+        setSavedPresets(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch presets:", err);
+    }
+  }, []);
+
+  // Apply preset callback
+  const applyPreset = useCallback((preset: ChartSettingsData) => {
+    setPhaseAmount(preset.phaseAmount);
+    setShowMidpoint(preset.showMidpoint);
+    setClusterOpacity(preset.clusterOpacity);
+    setClusterBullishColor(preset.clusterBullishColor);
+    setClusterBearishColor(preset.clusterBearishColor);
+    setClusterBorderColor(preset.clusterBorderColor);
+    setClusterBorderStyle(preset.clusterBorderStyle);
+    setSettings({
+      lineColor: preset.lineColor,
+      bgUpColor: preset.bgUpColor,
+      bgDownColor: preset.bgDownColor,
+      transparency: preset.transparency,
+      candleUpColor: preset.candleUpColor,
+      candleDownColor: preset.candleDownColor,
+      candleBorderUp: preset.candleBorderUp,
+      candleBorderDown: preset.candleBorderDown,
+    });
+  }, []);
+
+  // Load presets on mount
+  useEffect(() => {
+    fetchPresets();
+  }, [fetchPresets]);
 
   const {
     status: wsStatus,
     subscribedTickers,
     subscribeTicker,
     unsubscribeTicker,
-    getCandles,
     getClusters,
     requestClusters,
-    lastCandle,
     enableAutoClusters,
     disableAutoClusters,
     isAutoClustersEnabled,
+    connectedSymbols,
+    tickerData,
   } = useTradingData();
 
   const {
@@ -155,23 +228,46 @@ export default function NormalChartPage() {
     };
   }, []);
 
-  // Subscribe to ticker when switching to WebSocket mode
+  // Auto-select first connected symbol when server FIRST connects (not on every ticker change)
+  const hasAutoSelectedRef = useRef(false);
   useEffect(() => {
-    if (dataSource === "websocket" && wsStatus === "open") {
+    if (connectedSymbols.length > 0 && !hasAutoSelectedRef.current) {
+      // Only auto-select if current ticker is empty or the default "NQ" on first load
+      if (!wsTicker || wsTicker === "NQ") {
+        setWsTicker(connectedSymbols[0]);
+      }
+      hasAutoSelectedRef.current = true;
+    }
+  }, [connectedSymbols, wsTicker]);
+
+  // Subscribe to ticker when switching to WebSocket mode or when ticker changes
+  useEffect(() => {
+    if (dataSource === "websocket" && wsStatus === "open" && wsTicker) {
       if (!subscribedTickers.has(wsTicker)) {
         subscribeTicker(wsTicker);
       }
     }
-  }, [dataSource, wsStatus, subscribedTickers, subscribeTicker]);
+  }, [dataSource, wsStatus, wsTicker, subscribedTickers, subscribeTicker]);
+
+  // Get candles for current ticker - extract from tickerData for reactivity
+  const tickerInfo = tickerData.get(wsTicker);
+  const wsCandles = tickerInfo?.candles ?? [];
+  const lastTickPrice = tickerInfo?.lastTick?.price ?? null;
 
   // Compute chart data based on source
-  // Include lastCandle in deps to trigger updates when new candles arrive
   const chartData = useMemo(() => {
     if (dataSource === "csv") {
       return csvData;
     }
-    return wsCandiesToChartCandles(getCandles(wsTicker));
-  }, [dataSource, csvData, getCandles, lastCandle]);
+    return wsCandiesToChartCandles(wsCandles);
+  }, [dataSource, csvData, wsCandles]);
+
+  // Get current price for display - use lastTick price directly
+  const currentPrice =
+    dataSource === "websocket"
+      ? (lastTickPrice ??
+        (wsCandles.length > 0 ? wsCandles[wsCandles.length - 1]?.close : null))
+      : null;
 
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -187,8 +283,25 @@ export default function NormalChartPage() {
               <h2 className="text-base font-semibold text-zinc-100">
                 Price Chart
               </h2>
-              <div className="text-xs text-zinc-400">
-                {dataSource === "csv" ? "CSV File" : `WS: ${wsTicker}`}
+              <div className="flex items-center gap-3">
+                {dataSource === "websocket" && currentPrice !== null && (
+                  <span className="text-lg font-mono font-semibold text-emerald-400">
+                    ${currentPrice.toFixed(2)}
+                  </span>
+                )}
+                <span className="text-xs text-zinc-400">
+                  {dataSource === "csv"
+                    ? "CSV File"
+                    : `${wsTicker} (${isSierra ? "Sierra" : "yfinance"})`}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={() => setExtraOpen(true)}
+                >
+                  <Settings className="h-4 w-4 text-zinc-400" />
+                </Button>
               </div>
             </div>
 
@@ -209,6 +322,10 @@ export default function NormalChartPage() {
                   dataSource === "websocket" ? getClusters(wsTicker) : null
                 }
                 clusterOpacity={clusterOpacity}
+                clusterBullishColor={clusterBullishColor}
+                clusterBearishColor={clusterBearishColor}
+                clusterBorderColor={clusterBorderColor}
+                clusterBorderStyle={clusterBorderStyle}
               />
             </div>
           </div>
@@ -286,21 +403,38 @@ export default function NormalChartPage() {
                       >
                         {wsStatus}
                       </Badge>
+                      <Badge
+                        variant="outline"
+                        className={
+                          isSierra
+                            ? "text-blue-400 border-blue-400/30"
+                            : "text-purple-400 border-purple-400/30"
+                        }
+                      >
+                        {isSierra ? "Sierra" : "yfinance"}
+                      </Badge>
                       <span className="text-zinc-400">
-                        {getCandles(wsTicker).length} candles
+                        {wsCandles.length} candles
                       </span>
+                      {currentPrice !== null && (
+                        <span className="text-emerald-400 font-mono">
+                          ${currentPrice.toFixed(2)}
+                        </span>
+                      )}
                     </div>
                     {wsStatus !== "open" && (
                       <div className="text-xs text-amber-400">
-                        Server not connected. Start the server with: python
-                        main.py
+                        Start Rust server: cd BACKEND/phaseshifter-server &&
+                        cargo run --release -- --symbols NQ,ES
                       </div>
                     )}
                     {wsStatus === "open" &&
-                      getCandles(wsTicker).length === 0 &&
+                      wsCandles.length === 0 &&
                       subscribedTickers.has(wsTicker) && (
                         <div className="text-xs text-zinc-500">
-                          Waiting for candles... (server polls every 60s)
+                          {isSierra
+                            ? "Waiting for Sierra Chart data..."
+                            : "Waiting for yfinance data (updates every 60s)..."}
                         </div>
                       )}
                   </div>
@@ -319,7 +453,7 @@ export default function NormalChartPage() {
                   {getClusters(wsTicker) && (
                     <div className="flex items-center justify-between pt-2">
                       <Label className="text-sm text-zinc-200">
-                        Auto-refresh (5 min)
+                        Auto-refresh (on bar close)
                       </Label>
                       <Switch
                         checked={isAutoClustersEnabled(wsTicker)}
@@ -419,6 +553,23 @@ export default function NormalChartPage() {
       <ExtraSettingsDialog
         open={extraOpen}
         onOpenChange={setExtraOpen}
+        // Chart behavior
+        phaseAmount={phase}
+        setPhaseAmount={setPhaseAmount}
+        showMidpoint={showMidpoint}
+        setShowMidpoint={setShowMidpoint}
+        // Cluster settings
+        clusterOpacity={clusterOpacity}
+        setClusterOpacity={setClusterOpacity}
+        clusterBullishColor={clusterBullishColor}
+        setClusterBullishColor={setClusterBullishColor}
+        clusterBearishColor={clusterBearishColor}
+        setClusterBearishColor={setClusterBearishColor}
+        clusterBorderColor={clusterBorderColor}
+        setClusterBorderColor={setClusterBorderColor}
+        clusterBorderStyle={clusterBorderStyle}
+        setClusterBorderStyle={setClusterBorderStyle}
+        // Midpoint colors
         lineColor={lineColor}
         setLineColor={(val) =>
           setSettings((prev) => ({ ...prev, lineColor: val }))
@@ -435,6 +586,7 @@ export default function NormalChartPage() {
         setTransparency={(val) =>
           setSettings((prev) => ({ ...prev, transparency: val }))
         }
+        // Candle colors
         candleUpColor={candleUpColor}
         setCandleUpColor={(val) =>
           setSettings((prev) => ({ ...prev, candleUpColor: val }))
@@ -451,6 +603,10 @@ export default function NormalChartPage() {
         setCandleBorderDown={(val) =>
           setSettings((prev) => ({ ...prev, candleBorderDown: val }))
         }
+        // Save/Load presets
+        savedPresets={savedPresets}
+        onRefreshPresets={fetchPresets}
+        onApplyPreset={applyPreset}
       />
     </div>
   );
@@ -470,6 +626,10 @@ type Props = {
   candleBorderDown: string;
   clusters?: ClustersData | null;
   clusterOpacity?: number; // 10-80%, controls cluster rectangle transparency
+  clusterBullishColor?: string;
+  clusterBearishColor?: string;
+  clusterBorderColor?: string;
+  clusterBorderStyle?: "solid" | "dashed" | "none";
 };
 
 const colorWithAlpha = (hex: string, alpha: number) => {
@@ -497,6 +657,10 @@ export function PriceChart({
   candleBorderDown,
   clusters,
   clusterOpacity = 25,
+  clusterBullishColor = "#22c55e",
+  clusterBearishColor = "#ef4444",
+  clusterBorderColor = "#ffffff",
+  clusterBorderStyle = "dashed",
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -507,7 +671,6 @@ export function PriceChart({
   const clusterPrimitiveRef = useRef<ClusterRectanglesPrimitive | null>(null);
   const bgColorRef = useRef<string | null>(null);
   const [currentBg, setCurrentBg] = useState<string | null>(null);
-
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -597,9 +760,31 @@ export function PriceChart({
   }, [candleUpColor, candleDownColor, candleBorderUp, candleBorderDown]);
 
   useEffect(() => {
-    if (!candleSeriesRef.current || !midpointSeriesRef.current) return;
+    if (
+      !candleSeriesRef.current ||
+      !midpointSeriesRef.current ||
+      !chartRef.current
+    )
+      return;
 
-    candleSeriesRef.current.setData(data as BarData[]);
+    if (data.length === 0) return;
+
+    // Sort data by time and remove duplicates (required by TradingView charts)
+    const getTimeValue = (time: string | number): number => {
+      return typeof time === "number" ? time : new Date(time).getTime() / 1000;
+    };
+
+    const sortedData = [...data]
+      .sort((a, b) => getTimeValue(a.time) - getTimeValue(b.time))
+      .filter((candle, index, arr) => {
+        if (index === 0) return true;
+        return getTimeValue(candle.time) > getTimeValue(arr[index - 1].time);
+      });
+
+    if (sortedData.length === 0) return;
+
+    // Always use setData for simplicity and consistency (matches working implementation)
+    candleSeriesRef.current.setData(sortedData as BarData[]);
 
     const safePhase = Number.isFinite(phaseAmount)
       ? Math.max(1, Math.floor(phaseAmount))
@@ -607,9 +792,11 @@ export function PriceChart({
 
     const midpointData = calculateDonchianMidpoint({
       phaseAmount: safePhase,
-      data,
+      data: sortedData,
     });
 
+    // For midpoint, always use setData since it's calculated data
+    // (TradingView doesn't support update for derived series as efficiently)
     midpointSeriesRef.current.setData(midpointData);
 
     const alpha = Math.max(0, Math.min(100, transparency));
@@ -658,11 +845,18 @@ export function PriceChart({
     // Convert clusterOpacity (10-80%) to decimal (0.1-0.8)
     const opacity = clusterOpacity / 100;
 
+    // Helper to convert hex color to rgba with opacity
+    const hexToRgba = (hex: string, alpha: number): string => {
+      const normalized = hex.startsWith("#") ? hex.slice(1) : hex;
+      const r = parseInt(normalized.slice(0, 2), 16);
+      const g = parseInt(normalized.slice(2, 4), 16);
+      const b = parseInt(normalized.slice(4, 6), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    };
+
     const rects: ClusterRect[] = clusters.clusters.map((cluster, idx) => {
       const isBullish = cluster.side === "bullish";
-      // === COLOR: RGB values for cluster fill ===
-      // Green (34, 197, 94) for bullish, Red (239, 68, 68) for bearish
-      const baseColor = isBullish ? "34, 197, 94" : "239, 68, 68";
+      const baseColor = isBullish ? clusterBullishColor : clusterBearishColor;
       const label = `${isBullish ? "▲" : "▼"} ${cluster.count} (${cluster.unique_scenarios} scenarios)`;
 
       return {
@@ -670,15 +864,25 @@ export function PriceChart({
         low: cluster.low,
         high: cluster.high,
         startTime,
-        // === COLOR: Fill with configurable opacity from slider ===
-        color: `rgba(${baseColor}, ${opacity})`,
+        color: hexToRgba(baseColor, opacity),
         side: cluster.side,
         label,
+        borderColor:
+          clusterBorderStyle !== "none" ? clusterBorderColor : undefined,
+        borderStyle: clusterBorderStyle,
       };
     });
 
     clusterPrimitiveRef.current.setRectangles(rects);
-  }, [clusters, data, clusterOpacity]);
+  }, [
+    clusters,
+    data,
+    clusterOpacity,
+    clusterBullishColor,
+    clusterBearishColor,
+    clusterBorderColor,
+    clusterBorderStyle,
+  ]);
 
   return (
     <div className="absolute inset-0 h-full w-full min-h-[480px]">

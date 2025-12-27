@@ -34,6 +34,10 @@ export interface ClusterRect {
   color: string;
   side: "bullish" | "bearish";
   label?: string;
+  /** Custom border color (optional, defaults to side-based color) */
+  borderColor?: string;
+  /** Border style: solid, dashed, or none */
+  borderStyle?: "solid" | "dashed" | "none";
 }
 
 interface SeriesApi {
@@ -54,7 +58,7 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
       callback: (scope: {
         context: CanvasRenderingContext2D;
         mediaSize: { width: number; height: number };
-      }) => void
+      }) => void,
     ) => void;
   }) {
     // Early exit if no data
@@ -103,51 +107,62 @@ class ClusterRectanglesPaneRenderer implements IPrimitivePaneRenderer {
           const borderRadius = Math.min(4, height / 2, width / 2);
           const isBullish = rect.side === "bullish";
 
-          // === COLOR: Border color based on cluster side ===
-          // Green (#22c55e) for bullish targets, Red (#ef4444) for bearish targets
-          const borderColor = isBullish ? "#22c55e" : "#ef4444";
+          // === COLOR: Border color - use custom or fall back to side-based ===
+          const defaultBorderColor = isBullish ? "#22c55e" : "#ef4444";
+          const borderColor = rect.borderColor ?? defaultBorderColor;
+          const borderStyle = rect.borderStyle ?? "dashed";
 
           // === FILL: Semi-transparent rectangle background ===
           // Color comes from rect.color which includes opacity (e.g. "rgba(34, 197, 94, 0.25)")
           // Opacity is controlled by the clusterOpacity setting in the parent component
           ctx.beginPath();
-          ctx.roundRect(x, y, width, height, [borderRadius, 0, 0, borderRadius]);
+          ctx.roundRect(x, y, width, height, [
+            borderRadius,
+            0,
+            0,
+            borderRadius,
+          ]);
           ctx.fillStyle = rect.color;
           ctx.fill();
 
-          // === LEFT BORDER: Colored accent line (2px) ===
-          // Thicker border on left edge to highlight cluster zone boundary
-          // Uses same green/red color scheme based on bullish/bearish side
-          ctx.beginPath();
-          ctx.moveTo(x + borderRadius, y);
-          ctx.lineTo(x, y + borderRadius);
-          ctx.lineTo(x, y + height - borderRadius);
-          ctx.lineTo(x + borderRadius, y + height);
-          ctx.strokeStyle = borderColor;
-          ctx.lineWidth = 2;
-          ctx.stroke();
+          // Skip border drawing if style is "none"
+          if (borderStyle !== "none") {
+            // === LEFT BORDER: Colored accent line (2px) ===
+            // Thicker border on left edge to highlight cluster zone boundary
+            ctx.beginPath();
+            ctx.moveTo(x + borderRadius, y);
+            ctx.lineTo(x, y + borderRadius);
+            ctx.lineTo(x, y + height - borderRadius);
+            ctx.lineTo(x + borderRadius, y + height);
+            ctx.strokeStyle = borderColor;
+            ctx.lineWidth = 2;
+            ctx.stroke();
 
-          // === DASHED BORDERS: Top and bottom horizontal lines ===
-          // Subtle dashed lines at 50% opacity (globalAlpha = 0.5)
-          // Dash pattern: 4px on, 4px off
-          // Extends from left edge to right edge of chart
-          ctx.beginPath();
-          ctx.setLineDash([4, 4]);
-          ctx.moveTo(x + borderRadius, y);
-          ctx.lineTo(x + width, y);
-          ctx.moveTo(x + borderRadius, y + height);
-          ctx.lineTo(x + width, y + height);
-          ctx.strokeStyle = borderColor;
-          ctx.lineWidth = 1;
-          ctx.globalAlpha = 0.5;
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.globalAlpha = 1;
+            // === TOP/BOTTOM BORDERS: Horizontal lines ===
+            // Style based on borderStyle setting (solid or dashed)
+            ctx.beginPath();
+            if (borderStyle === "dashed") {
+              ctx.setLineDash([4, 4]);
+            } else {
+              ctx.setLineDash([]);
+            }
+            ctx.moveTo(x + borderRadius, y);
+            ctx.lineTo(x + width, y);
+            ctx.moveTo(x + borderRadius, y + height);
+            ctx.lineTo(x + width, y + height);
+            ctx.strokeStyle = borderColor;
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.5;
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+          }
 
           // === LABEL: Badge with cluster info ===
           if (rect.label) {
             const padding = 6;
-            ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, sans-serif";
+            ctx.font =
+              "bold 11px -apple-system, BlinkMacSystemFont, sans-serif";
             const textMetrics = ctx.measureText(rect.label);
             const textHeight = 14;
             const labelBgWidth = textMetrics.width + padding * 2;

@@ -1,0 +1,44 @@
+[package]
+name = "phaseshifter-server"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time streaming server for PhaseShifter - connects to Sierra Chart via DTC protocol"
+
+[dependencies]
+# Core library
+phaseshifter-core = { path = "../phaseshifter-core" }
+
+# Async runtime
+tokio = { version = "1.41", features = ["full", "rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Binary parsing for DTC protocol
+bytes = "1.7"
+byteorder = "1.5"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Utilities
+dashmap = "6.1"  # Concurrent hashmap for subscriptions
+
+# HTTP client for yfinance
+reqwest = { version = "0.12", features = ["json"] }

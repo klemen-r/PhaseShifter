@@ -1,6 +1,5 @@
 // Server-only Prisma helpers
-import { PrismaClient } from "@prisma/client";
-import type { Prisma } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 
 declare global {
   // eslint-disable-next-line no-var

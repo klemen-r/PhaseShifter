@@ -1,0 +1,208 @@
+# PhaseShifter Real-Time Streaming Server
+
+High-performance Rust server that connects to Sierra Chart via DTC protocol and streams real-time market data to the frontend via WebSocket.
+
+## Features
+
+- **DTC Protocol Integration**: Connects to Sierra Chart's DTC server for real-time tick data
+- **Auto Contract Detection**: Automatically detects front-month futures contracts (NQ → NQH26, ES → ESH26, etc.)
+- **Multi-Timeframe Bar Building**: Constructs OHLCV bars for M1, M5, M15, H1 timeframes from tick data
+- **PhaseEngine Integration**: Real-time phase detection and node creation using the phaseshifter-core engine
+- **WebSocket Broadcasting**: Streams ticks, bars, phase updates, and nodes to connected clients
+
+## Usage
+
+```bash
+# Build the server
+cargo build --release
+
+# Run with default settings (connects to Sierra Chart on localhost:11099, serves WebSocket on localhost:8000)
+cargo run --release
+
+# Run with custom settings
+cargo run --release -- \
+  --dtc-host 127.0.0.1 \
+  --dtc-port 11099 \
+  --ws-host 127.0.0.1 \
+  --ws-port 8000 \
+  --symbols NQ,ES \
+  --log-level info
+```
+
+## Command-Line Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dtc-host` | `127.0.0.1` | Sierra Chart DTC server host |
+| `--dtc-port` | `11099` | Sierra Chart DTC server port |
+| `--ws-host` | `127.0.0.1` | WebSocket server bind address |
+| `--ws-port` | `8000` | WebSocket server port |
+| `--symbols` | `NQ,ES` | Comma-separated base symbols (e.g., "NQ,ES,YM") |
+| `--log-level` | `info` | Log level: error, warn, info, debug, trace |
+
+## Contract Auto-Detection
+
+The server automatically detects front-month futures contracts based on CME's quarterly expiration cycle (H=March, M=June, U=September, Z=December). It rolls to the next contract approximately 10 days into the expiry month.
+
+Examples:
+- `NQ` → `NQH26` (March 2026)
+- `ES` → `ESH26` (March 2026)
+- `YM` → `YMH26` (March 2026)
+
+## WebSocket Protocol
+
+The server broadcasts the following message types to connected clients:
+
+### Connection
+```json
+{
+  "type": "connected",
+  "client_id": 1,
+  "symbols": ["NQ", "ES"]
+}
+```
+
+### Tick Data
+```json
+{
+  "type": "tick",
+  "symbol": "NQ",
+  "price": 18500.50,
+  "volume": 5.0,
+  "timestamp": 1704067200000,
+  "bid": 18500.25,
+  "ask": 18500.75
+}
+```
+
+### Bar Updates
+```json
+{
+  "type": "bar_update",
+  "symbol": "NQ",
+  "timeframe": "1m",
+  "time": 1704067200000,
+  "open": 18500.00,
+  "high": 18501.00,
+  "low": 18499.50,
+  "close": 18500.50,
+  "volume": 125.0
+}
+```
+
+### Bar Closed
+```json
+{
+  "type": "bar_closed",
+  "symbol": "NQ",
+  "timeframe": "1m",
+  "time": 1704067200000,
+  "open": 18500.00,
+  "high": 18501.00,
+  "low": 18499.50,
+  "close": 18500.75,
+  "volume": 150.0
+}
+```
+
+### Phase Updates
+```json
+{
+  "type": "phase_update",
+  "symbol": "NQ",
+  "timeframe": "5m",
+  "time": 1704067500000,
+  "phase": "bullish",
+  "anchor": 18495.25,
+  "dm": 18496.50
+}
+```
+
+### Node Created
+```json
+{
+  "type": "node_created",
+  "symbol": "NQ",
+  "timeframe": "5m",
+  "direction": "bullish",
+  "distance_pct": 0.0025,
+  "anchor": 18495.25,
+  "extreme": 18541.50,
+  "created_at": 1704067500000
+}
+```
+
+## Client Messages
+
+Clients can send the following messages to the server:
+
+### Subscribe
+```json
+{
+  "type": "subscribe",
+  "symbol": "NQ",
+  "timeframes": ["1m", "5m", "15m"]
+}
+```
+
+### Get History
+```json
+{
+  "type": "get_history",
+  "symbol": "NQ",
+  "timeframe": "5m",
+  "limit": 500
+}
+```
+
+### Ping
+```json
+{
+  "type": "ping",
+  "timestamp": 1704067200000
+}
+```
+
+## Architecture
+
+```
+Sierra Chart (DTC) → DTC Client → BarBuilder → PhaseEngine
+                                      ↓            ↓
+                                  WebSocket Server
+                                      ↓
+                                Frontend Clients
+```
+
+1. **DTC Client**: Connects to Sierra Chart, handles connection lifecycle, subscribes to market data
+2. **BarBuilder**: Constructs multi-timeframe OHLCV bars from tick data
+3. **PhaseEngine**: Processes closed bars to detect phase shifts and create nodes
+4. **WebSocket Server**: Broadcasts all events to connected clients with subscription filtering
+
+## Development
+
+```bash
+# Run in development mode with debug logging
+cargo run -- --log-level debug
+
+# Run tests
+cargo test
+
+# Format code
+cargo fmt
+
+# Check for issues
+cargo clippy
+```
+
+## Dependencies
+
+- `tokio` - Async runtime
+- `tokio-tungstenite` - WebSocket server
+- `serde` / `serde_json` - Serialization
+- `phaseshifter-core` - Phase engine and node calculations
+- `dashmap` - Concurrent hash map for client state
+- `tracing` - Logging
+
+## License
+
+Same as parent project

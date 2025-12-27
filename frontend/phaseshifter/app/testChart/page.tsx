@@ -121,14 +121,14 @@ export default function TestChartPage() {
   const [showClusterLabels, setShowClusterLabels] = useState(true);
   const [clusterOpacity, setClusterOpacity] = useState(30);
   const [dataSource, setDataSource] = useState<"sample" | "websocket">(
-    "sample"
+    "sample",
   );
-  const [wsTicker, setWsTicker] = useState("NQ=F");
+  const [wsTicker, setWsTicker] = useState("NQ");
 
   // Sample data state
   const [sampleCandles] = useState(() => generateSampleCandles(200));
   const [sampleClusters, setSampleClusters] = useState<ClustersData | null>(
-    null
+    null,
   );
 
   // WebSocket data
@@ -140,6 +140,7 @@ export default function TestChartPage() {
     getCandles,
     getClusters,
     requestClusters,
+    connectedSymbols,
   } = useTradingData();
 
   // Initialize sample clusters based on candle data
@@ -149,6 +150,13 @@ export default function TestChartPage() {
       setSampleClusters(generateSampleClusters(lastPrice));
     }
   }, [sampleCandles]);
+
+  // Auto-select first connected symbol when server connects
+  useEffect(() => {
+    if (connectedSymbols.length > 0 && !connectedSymbols.includes(wsTicker)) {
+      setWsTicker(connectedSymbols[0]);
+    }
+  }, [connectedSymbols, wsTicker]);
 
   // Get data based on source
   const candles = useMemo(() => {
@@ -197,20 +205,14 @@ export default function TestChartPage() {
                   {dataSource === "sample" ? "Sample Data" : wsTicker}
                 </Badge>
                 {clusters && (
-                  <Badge
-                    variant="secondary"
-                    className="text-xs"
-                  >
+                  <Badge variant="secondary" className="text-xs">
                     {clusters.clusters.length} clusters
                   </Badge>
                 )}
               </div>
             </div>
 
-            <div
-              className="relative flex-1"
-              onPointerDown={handleChartFocus}
-            >
+            <div className="relative flex-1" onPointerDown={handleChartFocus}>
               <TestChart
                 candles={candles}
                 clusters={clusters}
@@ -254,7 +256,9 @@ export default function TestChartPage() {
                   <div className="flex gap-2">
                     <Input
                       value={wsTicker}
-                      onChange={(e) => setWsTicker(e.target.value.toUpperCase())}
+                      onChange={(e) =>
+                        setWsTicker(e.target.value.toUpperCase())
+                      }
                       placeholder="NQ=F"
                       className="font-mono"
                     />
@@ -544,7 +548,8 @@ function ClustersList({ clusters }: { clusters: ClustersData }) {
     <div className="space-y-4">
       {clusters.anchor && (
         <div className="text-xs text-zinc-400 pb-2">
-          Anchor: <span className="font-mono">{formatPrice(clusters.anchor)}</span>
+          Anchor:{" "}
+          <span className="font-mono">{formatPrice(clusters.anchor)}</span>
         </div>
       )}
 
@@ -555,7 +560,11 @@ function ClustersList({ clusters }: { clusters: ClustersData }) {
           </div>
           <div className="space-y-2">
             {bullish.map((cluster, idx) => (
-              <ClusterCard key={`bull-${idx}`} cluster={cluster} anchor={clusters.anchor} />
+              <ClusterCard
+                key={`bull-${idx}`}
+                cluster={cluster}
+                anchor={clusters.anchor}
+              />
             ))}
           </div>
         </div>
@@ -568,7 +577,11 @@ function ClustersList({ clusters }: { clusters: ClustersData }) {
           </div>
           <div className="space-y-2">
             {bearish.map((cluster, idx) => (
-              <ClusterCard key={`bear-${idx}`} cluster={cluster} anchor={clusters.anchor} />
+              <ClusterCard
+                key={`bear-${idx}`}
+                cluster={cluster}
+                anchor={clusters.anchor}
+              />
             ))}
           </div>
         </div>
