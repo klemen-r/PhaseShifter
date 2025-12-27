@@ -18,10 +18,9 @@ if TYPE_CHECKING:
 @dataclass
 class CachedCandles:
     """Cached candle data with timestamp for TTL checking."""
-
     candles: list[dict]
     fetched_at: float  # time.time()
-    interval: str  # "1m" or "5m"
+    interval: str      # "1m" or "5m"
 
 
 class DataStreamer:
@@ -30,9 +29,7 @@ class DataStreamer:
     FLAT_RATIO_THRESHOLD = 0.9
     FLAT_MIN_SAMPLES = 30
 
-    def __init__(
-        self, server: "WebSocketServer", poll_interval: int = 60, cache_ttl: int = 30
-    ):
+    def __init__(self, server: "WebSocketServer", poll_interval: int = 60, cache_ttl: int = 30):
         self.server = server
         self.poll_interval = poll_interval  # seconds
         self._running = False
@@ -211,9 +208,7 @@ class DataStreamer:
 
             if candles:
                 source = "cached" if from_cache else "fetched"
-                print(
-                    f"    → Sending {len(candles)} initial candles to {client_id} ({source})"
-                )
+                print(f"    → Sending {len(candles)} initial candles to {client_id} ({source})")
                 for candle in candles:
                     await self.server.send_to_client(
                         client_id,
