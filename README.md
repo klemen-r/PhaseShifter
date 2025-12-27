@@ -44,7 +44,7 @@ Real-time trading analysis platform that identifies price phase shifts and proje
 **1. Install ACSIL Study**
 ```bash
 # Copy the study to Sierra Chart
-copy BACKEND\sierra-study\PhaseShifterStream.cpp "D:\Trading\Sierra\ACS_Source\"
+copy BACKEND\sierra-study\PhaseShifterStream.cpp "...\ACS_Source\"
 
 # In Sierra Chart: Analysis -> Build Custom Studies DLL
 # Add to chart: Analysis -> Studies -> Add Custom Study -> PhaseShifter Stream
