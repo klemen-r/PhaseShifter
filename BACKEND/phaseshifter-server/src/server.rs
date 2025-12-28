@@ -20,12 +20,10 @@ use phaseshifter_core::{Candle, EngineConfig, Phase, PhaseEngine, PhaseSide};
 
 use crate::bar_builder::{Bar, BarBuilder, BarEvent, Timeframe};
 use crate::clusters::{ClusterConfig, ClusterManager, ClustersData, ProjectionSide, TrackedNode};
-use crate::contracts::{is_sierra_symbol, to_sierra_symbol, to_sierra_symbol_with_exchange};
+use crate::contracts::{to_sierra_symbol, to_sierra_symbol_with_exchange};
 use crate::dtc::{DtcClient, DtcClientConfig, Tick};
-use crate::python_pipeline::{PythonClustersData, PythonPipelineRunner};
 use crate::scid::ScidReader;
 use crate::sierra_tcp::{SierraTcpConfig, SierraTcpServer, SymbolRegistry};
-use crate::yfinance::{YfinanceConfig, YfinancePoller};
 
 /// Client ID type
 type ClientId = u64;
@@ -115,8 +113,6 @@ pub enum WsOutMessage {
     },
     /// Cluster data response
     Clusters { ticker: String, data: ClustersData },
-    /// Candle message (Python server compatible format for yfinance)
-    Candle { ticker: String, data: CandleData },
     /// Error message
     Error { message: String },
     /// Pong response
@@ -139,17 +135,6 @@ pub struct OpenNodeInfo {
 pub struct HistoryBar {
     #[serde(rename = "time")]
     pub timestamp_ms: i64,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: f64,
-}
-
-/// Candle data (Python server compatible format)
-#[derive(Debug, Clone, Serialize)]
-pub struct CandleData {
-    pub time: i64,
     pub open: f64,
     pub high: f64,
     pub low: f64,
@@ -204,7 +189,6 @@ pub struct Server {
     symbols: Vec<String>,
     sierra_data_folder: String,
     sierra_tcp_port: u16,
-    yfinance_interval: u64,
 }
 
 impl Server {
@@ -216,7 +200,6 @@ impl Server {
         symbols: Vec<String>,
         sierra_data_folder: &str,
         sierra_tcp_port: u16,
-        yfinance_interval: u64,
     ) -> Self {
         Self {
             dtc_host: dtc_host.to_string(),
@@ -226,7 +209,6 @@ impl Server {
             symbols,
             sierra_data_folder: sierra_data_folder.to_string(),
             sierra_tcp_port,
-            yfinance_interval,
         }
     }
 
@@ -437,63 +419,6 @@ impl Server {
                 .await;
         });
 
-        // Set up yfinance poller for non-Sierra symbols
-        // Uses data-driven fallback: tries 1m first, falls back to 5m if data is flat
-        let (yfinance_bar_tx, yfinance_bar_rx) =
-            mpsc::channel::<crate::yfinance::YfinanceBar>(1000);
-        let yfinance_config = YfinanceConfig {
-            poll_interval_secs: self.yfinance_interval,
-            count: 5,
-        };
-        let yfinance_poller = Arc::new(YfinancePoller::new(yfinance_config, yfinance_bar_tx));
-
-        // Spawn yfinance poller task
-        let yfinance_poller_run = yfinance_poller.clone();
-        tokio::spawn(async move {
-            yfinance_poller_run.run().await;
-        });
-
-        // Spawn yfinance bar processing task
-        let bar_builder_yf = bar_builder.clone();
-        let broadcast_tx_yf = broadcast_tx.clone();
-        let engines_yf = engines.clone();
-        let cluster_manager_yf = cluster_manager.clone();
-        let scenarios_yf = scenarios.clone();
-        tokio::spawn(async move {
-            process_yfinance_bars(
-                yfinance_bar_rx,
-                bar_builder_yf,
-                broadcast_tx_yf,
-                engines_yf,
-                cluster_manager_yf,
-                scenarios_yf,
-            )
-            .await;
-        });
-
-        info!(
-            "[yfinance] Poller initialized with {}s interval",
-            self.yfinance_interval
-        );
-
-        // Create Python pipeline runner for yfinance symbols
-        // This calls the proven Python run_phase_pipeline.py script
-        let root_dir = std::path::PathBuf::from("D:\\PhaseShifter");
-        let python_pipeline = Arc::new(PythonPipelineRunner::new(root_dir));
-
-        // Spawn Python pipeline runner for multi-timeframe clustering
-        let yfinance_poller_pipeline = yfinance_poller.clone();
-        let python_pipeline_task = python_pipeline.clone();
-        let broadcast_tx_pipeline = broadcast_tx.clone();
-        tokio::spawn(async move {
-            run_python_pipeline(
-                yfinance_poller_pipeline,
-                python_pipeline_task,
-                broadcast_tx_pipeline,
-            )
-            .await;
-        });
-
         // Start WebSocket listener
         let addr: SocketAddr = format!("{}:{}", self.ws_host, self.ws_port).parse()?;
         let listener = TcpListener::bind(&addr).await?;
@@ -540,8 +465,6 @@ impl Server {
                     let engines = engines.clone();
                     let cluster_manager = cluster_manager.clone();
                     let symbols = self.symbols.clone();
-                    let yfinance_poller = yfinance_poller.clone();
-                    let python_pipeline = python_pipeline.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_client(
@@ -554,8 +477,6 @@ impl Server {
                             engines,
                             cluster_manager,
                             symbols,
-                            yfinance_poller,
-                            python_pipeline,
                         )
                         .await
                         {
@@ -765,239 +686,6 @@ async fn process_bar_verifications(
     }
 
     warn!("Bar verification receiver closed");
-}
-
-/// Process bars from yfinance poller
-/// This feeds yfinance bars directly into the BarBuilder and PhaseEngine pipeline
-async fn process_yfinance_bars(
-    mut bar_rx: mpsc::Receiver<crate::yfinance::YfinanceBar>,
-    bar_builder: Arc<RwLock<BarBuilder>>,
-    broadcast_tx: broadcast::Sender<WsOutMessage>,
-    engines: Arc<DashMap<(String, Timeframe, usize), RwLock<EngineState>>>,
-    cluster_manager: Arc<RwLock<ClusterManager>>,
-    scenarios: Vec<(Timeframe, usize)>,
-) {
-    info!("[yfinance] Bar processing task started");
-
-    // Track last bar time per symbol to detect new bars
-    let mut last_bar_times: HashMap<String, i64> = HashMap::new();
-
-    while let Some(yf_bar) = bar_rx.recv().await {
-        let symbol = yf_bar.symbol.clone();
-        let bar_time = yf_bar.timestamp_ms;
-
-        // Check if this is a new bar or update to existing
-        let is_new_bar = last_bar_times
-            .get(&symbol)
-            .map(|&t| bar_time > t)
-            .unwrap_or(true);
-
-        // Use timeframe from the bar itself (set by yfinance fallback logic)
-        // 1m is primary, 5m is fallback if data is "flat"
-        let timeframe_str = &yf_bar.timeframe;
-        let timeframe = Timeframe::from_str(timeframe_str).unwrap_or(Timeframe::M1);
-
-        // Convert to standard Bar format
-        let bar = yf_bar.to_bar();
-
-        // Broadcast bar update/closed to WebSocket clients
-        if is_new_bar {
-            // First, close the previous bar if we had one
-            if let Some(&prev_time) = last_bar_times.get(&symbol) {
-                debug!(
-                    "[yfinance] Bar closed for {} at {}, new bar at {}",
-                    symbol, prev_time, bar_time
-                );
-            }
-
-            // Broadcast as Candle message (Python server compatible format)
-            let candle_msg = WsOutMessage::Candle {
-                ticker: symbol.clone(),
-                data: CandleData {
-                    time: bar.timestamp_ms,
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
-                    volume: bar.volume,
-                },
-            };
-            let _ = broadcast_tx.send(candle_msg);
-
-            // Update last bar time
-            last_bar_times.insert(symbol.clone(), bar_time);
-
-            // Feed the bar to phase engines for this symbol
-            let candle = Candle {
-                timestamp_ms: bar.timestamp_ms,
-                open: bar.open,
-                high: bar.high,
-                low: bar.low,
-                close: bar.close,
-                volume: bar.volume,
-            };
-
-            // Process through each scenario's engine
-            for &(tf, phase_window) in &scenarios {
-                // Only process bars that match the scenario timeframe
-                // Crypto uses M5, stocks use M1
-                if tf != timeframe {
-                    continue;
-                }
-
-                let key = (symbol.clone(), tf, phase_window);
-                if let Some(entry) = engines.get(&key) {
-                    let mut state = entry.write().await;
-                    if let Some(dm) = state.engine.on_candle(&candle) {
-                        // Broadcast phase update
-                        if let Some(phase) = state.engine.current_phase() {
-                            if let Some(anchor) = state.engine.current_anchor() {
-                                let phase_msg = WsOutMessage::PhaseUpdate {
-                                    symbol: symbol.clone(),
-                                    timeframe: tf.as_str().to_string(),
-                                    timestamp_ms: bar.timestamp_ms,
-                                    phase: format!("{:?}", phase).to_lowercase(),
-                                    anchor,
-                                    dm,
-                                };
-                                let _ = broadcast_tx.send(phase_msg);
-                            }
-                        }
-
-                        // Check for phase flip and node creation
-                        if let Some(flip) = state.engine.take_last_phase_flip() {
-                            // Node direction matches the phase we're coming FROM
-                            let direction = match flip.from {
-                                Phase::Bullish => "bullish",
-                                Phase::Bearish => "bearish",
-                            };
-
-                            // Calculate extreme and projected value
-                            let (extreme, _projected_value, side) = if flip.from == Phase::Bullish {
-                                let extreme = flip.old_anchor * (1.0 + flip.node_move_pct);
-                                let projected = flip.new_anchor * (1.0 + flip.node_move_pct);
-                                (extreme, projected, ProjectionSide::Bullish)
-                            } else {
-                                let extreme = flip.old_anchor * (1.0 - flip.node_move_pct);
-                                let projected = flip.new_anchor * (1.0 - flip.node_move_pct);
-                                (extreme, projected, ProjectionSide::Bearish)
-                            };
-
-                            // Create tracked node in cluster manager
-                            let node = TrackedNode::new(
-                                side.clone(),
-                                tf.as_str().to_string(),
-                                phase_window,
-                                flip.node_move_pct,
-                                flip.old_anchor,
-                                bar.timestamp_ms,
-                            );
-
-                            {
-                                let mut cm = cluster_manager.write().await;
-                                cm.add_node(&symbol, node);
-                                cm.set_scenario_anchor(
-                                    &symbol,
-                                    tf.as_str(),
-                                    phase_window,
-                                    flip.new_anchor,
-                                );
-                            }
-
-                            // Broadcast node created
-                            let node_msg = WsOutMessage::NodeCreated {
-                                symbol: symbol.clone(),
-                                timeframe: tf.as_str().to_string(),
-                                direction: direction.to_string(),
-                                distance_pct: flip.node_move_pct,
-                                anchor: flip.old_anchor,
-                                extreme,
-                                created_at: bar.timestamp_ms,
-                            };
-                            let _ = broadcast_tx.send(node_msg);
-
-                            info!(
-                                "[yfinance] Node created for {}: {} {:.4}% from {:.2}",
-                                symbol,
-                                direction,
-                                flip.node_move_pct * 100.0,
-                                flip.old_anchor
-                            );
-                        }
-                    }
-                } else {
-                    // Engine doesn't exist for this symbol - create it dynamically
-                    debug!(
-                        "[yfinance] Creating engine for {} with tf={:?} pw={}",
-                        symbol, tf, phase_window
-                    );
-                    let config = EngineConfig {
-                        side: PhaseSide::Long,
-                        timeframe: tf.as_str().to_string(),
-                        warmup_candles: 0,
-                        phase_window,
-                        depth_days: 50,
-                    };
-                    let mut engine = PhaseEngine::new(symbol.clone(), config);
-                    // Feed the first candle to the new engine
-                    let _ = engine.on_candle(&candle);
-                    engines.insert(
-                        key.clone(),
-                        RwLock::new(EngineState {
-                            engine,
-                            timeframe: tf,
-                        }),
-                    );
-                }
-            }
-
-            // Update cluster manager with bar data for node closure detection
-            // Loop through M1 scenarios to update each one
-            {
-                let mut cm = cluster_manager.write().await;
-                for &(tf, phase_window) in &scenarios {
-                    if tf != Timeframe::M1 {
-                        continue;
-                    }
-                    // Get anchor for this scenario (or use close price as fallback)
-                    let anchor = cm
-                        .get_scenario_anchor(&symbol, tf.as_str(), phase_window)
-                        .unwrap_or(bar.close);
-                    cm.update_scenario_with_bar(
-                        &symbol,
-                        tf.as_str(),
-                        phase_window,
-                        anchor,
-                        bar.high,
-                        bar.low,
-                        bar.timestamp_ms,
-                    );
-                }
-            }
-        } else {
-            // Same bar time - broadcast as update using Candle format
-            let candle_msg = WsOutMessage::Candle {
-                ticker: symbol.clone(),
-                data: CandleData {
-                    time: bar.timestamp_ms,
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
-                    volume: bar.volume,
-                },
-            };
-            let _ = broadcast_tx.send(candle_msg);
-        }
-
-        // Also add bars to bar_builder for GetHistory requests
-        {
-            let mut builder = bar_builder.write().await;
-            builder.add_bar_directly(&symbol, timeframe, bar);
-        }
-    }
-
-    warn!("[yfinance] Bar receiver closed");
 }
 
 /// Load historical data from SCID files on disk
@@ -1442,8 +1130,6 @@ async fn handle_client(
     engines: Arc<DashMap<(String, Timeframe, usize), RwLock<EngineState>>>,
     cluster_manager: Arc<RwLock<ClusterManager>>,
     symbols: Vec<String>,
-    yfinance_poller: Arc<YfinancePoller>,
-    python_pipeline: Arc<PythonPipelineRunner>,
 ) -> Result<()> {
     info!("Client {} connected from {}", client_id, peer_addr);
 
@@ -1488,9 +1174,6 @@ async fn handle_client(
                                     &engines,
                                     &cluster_manager,
                                     &client_tx,
-                                    &yfinance_poller,
-                                    &symbols,
-                                    &python_pipeline,
                                 ).await?;
                             }
                             Err(e) => {
@@ -1570,9 +1253,6 @@ async fn handle_client_message(
     _engines: &Arc<DashMap<(String, Timeframe, usize), RwLock<EngineState>>>,
     cluster_manager: &Arc<RwLock<ClusterManager>>,
     client_tx: &mpsc::Sender<WsOutMessage>,
-    yfinance_poller: &Arc<YfinancePoller>,
-    sierra_symbols: &[String],
-    python_pipeline: &Arc<PythonPipelineRunner>,
 ) -> Result<()> {
     match msg {
         WsInMessage::Subscribe { symbol, timeframes } => {
@@ -1588,24 +1268,10 @@ async fn handle_client_message(
                 }
             }
 
-            // Check if this is a Sierra symbol or a yfinance symbol
-            let is_sierra = sierra_symbols.iter().any(|s| {
-                s.eq_ignore_ascii_case(&symbol_upper) || symbol_upper.starts_with(&s.to_uppercase())
-            });
-
-            if !is_sierra {
-                // Subscribe to yfinance for non-Sierra symbols
-                yfinance_poller.subscribe(&symbol_upper).await;
-                info!(
-                    "Client {} subscribed to {} (yfinance)",
-                    client_id, symbol_upper
-                );
-            } else {
-                debug!(
-                    "Client {} subscribed to {} (Sierra)",
-                    client_id, symbol_upper
-                );
-            }
+            debug!(
+                "Client {} subscribed to {} (Sierra)",
+                client_id, symbol_upper
+            );
         }
 
         WsInMessage::Unsubscribe { symbol } => {
@@ -1613,24 +1279,6 @@ async fn handle_client_message(
 
             if let Some(mut client) = clients.get_mut(&client_id) {
                 client.subscribed_symbols.retain(|s| s != &symbol_upper);
-            }
-
-            // Check if any other client is still subscribed to this yfinance symbol
-            let still_subscribed = clients
-                .iter()
-                .any(|entry| entry.value().subscribed_symbols.contains(&symbol_upper));
-
-            if !still_subscribed {
-                // Check if this is a yfinance symbol
-                let is_sierra = sierra_symbols.iter().any(|s| {
-                    s.eq_ignore_ascii_case(&symbol_upper)
-                        || symbol_upper.starts_with(&s.to_uppercase())
-                });
-
-                if !is_sierra {
-                    yfinance_poller.unsubscribe(&symbol_upper).await;
-                    info!("Unsubscribed {} from yfinance (no clients)", symbol_upper);
-                }
             }
 
             debug!("Client {} unsubscribed from {}", client_id, symbol_upper);
@@ -1688,85 +1336,35 @@ async fn handle_client_message(
                 ticker_upper, client_id
             );
 
-            // Use Rust ClusterManager for Sierra symbols (NQ, ES, YM)
-            // Use Python pipeline for yfinance symbols
-            if is_sierra_symbol(&ticker_upper) {
-                // Sierra symbol - use Rust-native cluster manager
-                let mut cm = cluster_manager.write().await;
-                if let Some(data) = cm.get_clusters(&ticker_upper) {
-                    let msg = WsOutMessage::Clusters {
-                        ticker: ticker_upper.clone(),
-                        data,
-                    };
-                    let _ = client_tx.send(msg).await;
-                    info!(
-                        "Sent clusters for {} to client {} (via Rust ClusterManager)",
-                        ticker_upper, client_id
-                    );
-                } else {
-                    // No clusters yet - might be warming up
-                    let msg = WsOutMessage::Clusters {
-                        ticker: ticker_upper.clone(),
-                        data: ClustersData {
-                            ticker: ticker_upper.clone(),
-                            anchor: None,
-                            clusters: vec![],
-                            nodes: vec![],
-                            generated_at: chrono::Utc::now().to_rfc3339(),
-                        },
-                    };
-                    let _ = client_tx.send(msg).await;
-                    info!(
-                        "No clusters available yet for {} (Sierra symbol warming up)",
-                        ticker_upper
-                    );
-                }
+            // Use Rust ClusterManager for all symbols
+            let mut cm = cluster_manager.write().await;
+            if let Some(data) = cm.get_clusters(&ticker_upper) {
+                let msg = WsOutMessage::Clusters {
+                    ticker: ticker_upper.clone(),
+                    data,
+                };
+                let _ = client_tx.send(msg).await;
+                info!(
+                    "Sent clusters for {} to client {} (via Rust ClusterManager)",
+                    ticker_upper, client_id
+                );
             } else {
-                // yfinance symbol - use Python pipeline
-                match python_pipeline.get_or_run(&ticker_upper).await {
-                    Ok(python_data) => {
-                        // Convert PythonClustersData to ClustersData format
-                        let data = ClustersData {
-                            ticker: ticker_upper.clone(),
-                            anchor: python_data.anchor,
-                            clusters: python_data
-                                .clusters
-                                .iter()
-                                .map(|c| crate::clusters::Cluster {
-                                    side: if c.side == "bullish" {
-                                        ProjectionSide::Bullish
-                                    } else {
-                                        ProjectionSide::Bearish
-                                    },
-                                    low: c.low,
-                                    high: c.high,
-                                    count: 1,            // Python doesn't expose this
-                                    unique_scenarios: 1, // Python doesn't expose this
-                                })
-                                .collect(),
-                            nodes: vec![], // Python pipeline handles nodes internally
-                            generated_at: python_data.generated_at.clone(),
-                        };
-                        let msg = WsOutMessage::Clusters {
-                            ticker: ticker_upper.clone(),
-                            data,
-                        };
-                        let _ = client_tx.send(msg).await;
-                        info!(
-                            "Sent {} clusters for {} to client {} (via Python pipeline)",
-                            python_data.clusters.len(),
-                            ticker_upper,
-                            client_id
-                        );
-                    }
-                    Err(e) => {
-                        let msg = WsOutMessage::Error {
-                            message: format!("Failed to get clusters for {}: {}", ticker_upper, e),
-                        };
-                        let _ = client_tx.send(msg).await;
-                        warn!("Failed to get clusters for {}: {}", ticker_upper, e);
-                    }
-                }
+                // No clusters yet - might be warming up
+                let msg = WsOutMessage::Clusters {
+                    ticker: ticker_upper.clone(),
+                    data: ClustersData {
+                        ticker: ticker_upper.clone(),
+                        anchor: None,
+                        clusters: vec![],
+                        nodes: vec![],
+                        generated_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                };
+                let _ = client_tx.send(msg).await;
+                info!(
+                    "No clusters available yet for {} (warming up)",
+                    ticker_upper
+                );
             }
         }
 
@@ -1796,8 +1394,6 @@ fn should_send_to_client(
         | WsOutMessage::PhaseUpdate { symbol, .. }
         | WsOutMessage::NodeCreated { symbol, .. }
         | WsOutMessage::NodeClosed { symbol, .. } => client.subscribed_symbols.contains(symbol),
-        // Candle uses "ticker" field instead of "symbol"
-        WsOutMessage::Candle { ticker, .. } => client.subscribed_symbols.contains(ticker),
         // Always send these
         WsOutMessage::Connected { .. }
         | WsOutMessage::Error { .. }
@@ -1805,185 +1401,5 @@ fn should_send_to_client(
         | WsOutMessage::OpenNodes { .. }
         | WsOutMessage::History { .. }
         | WsOutMessage::Clusters { .. } => true,
-    }
-}
-
-/// Pipeline interval in seconds (5 minutes, matching Python)
-const PYTHON_PIPELINE_INTERVAL_SECS: u64 = 300;
-
-/// Run the Python pipeline periodically to generate clusters from historical data
-/// This calls the proven run_phase_pipeline.py script which handles:
-/// - Fetching multi-timeframe data via yfinance
-/// - Running Rust core for each scenario
-/// - Extracting only OPEN nodes (not all historical phase flips)
-/// - Clustering using anchor-normalized adaptive-gap algorithm
-///
-/// NOTE: This only runs for yfinance symbols (not Sierra symbols like NQ, ES, YM)
-/// Sierra symbols use the Rust-native ClusterManager instead
-async fn run_python_pipeline(
-    yfinance_poller: Arc<YfinancePoller>,
-    python_pipeline: Arc<PythonPipelineRunner>,
-    broadcast_tx: broadcast::Sender<WsOutMessage>,
-) {
-    use std::collections::HashSet;
-    use tokio::time::{interval, Duration};
-
-    let mut ticker = interval(Duration::from_secs(PYTHON_PIPELINE_INTERVAL_SECS));
-    let mut processed_symbols: HashSet<String> = HashSet::new();
-
-    info!(
-        "[python-pipeline] Starting pipeline runner with {}s interval (yfinance symbols only)",
-        PYTHON_PIPELINE_INTERVAL_SECS
-    );
-
-    // Check for new symbols more frequently (every 5 seconds) to run pipeline immediately
-    // for newly subscribed symbols, while still running full refresh every 5 minutes
-    let mut new_symbol_check = interval(Duration::from_secs(5));
-
-    loop {
-        tokio::select! {
-            // Full refresh every 5 minutes
-            _ = ticker.tick() => {
-                let all_symbols = yfinance_poller.get_subscribed().await;
-                // Filter out Sierra symbols - they use Rust ClusterManager
-                let symbols: Vec<_> = all_symbols
-                    .into_iter()
-                    .filter(|s| !is_sierra_symbol(s))
-                    .collect();
-
-                if symbols.is_empty() {
-                    debug!("[python-pipeline] No yfinance symbols subscribed, skipping pipeline run");
-                    continue;
-                }
-
-                info!(
-                    "[python-pipeline] Running full pipeline refresh for {} yfinance symbols",
-                    symbols.len()
-                );
-
-                for symbol in &symbols {
-                    match python_pipeline.run_for_ticker(symbol).await {
-                        Ok(data) => {
-                            // Convert and broadcast clusters
-                            let clusters_data = ClustersData {
-                                ticker: symbol.clone(),
-                                anchor: data.anchor,
-                                clusters: data
-                                    .clusters
-                                    .iter()
-                                    .map(|c| crate::clusters::Cluster {
-                                        side: if c.side == "bullish" {
-                                            crate::clusters::ProjectionSide::Bullish
-                                        } else {
-                                            crate::clusters::ProjectionSide::Bearish
-                                        },
-                                        low: c.low,
-                                        high: c.high,
-                                        count: 1,
-                                        unique_scenarios: 1,
-                                    })
-                                    .collect(),
-                                nodes: vec![],
-                                generated_at: chrono::Utc::now().to_rfc3339(),
-                            };
-                            let msg = WsOutMessage::Clusters {
-                                ticker: symbol.clone(),
-                                data: clusters_data,
-                            };
-                            let _ = broadcast_tx.send(msg);
-                            info!(
-                                "[python-pipeline] Generated {} clusters for {}",
-                                data.clusters.len(),
-                                symbol
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "[python-pipeline] Failed to run pipeline for {}: {}",
-                                symbol, e
-                            );
-                        }
-                    }
-                }
-
-                // Update processed set
-                processed_symbols = symbols.into_iter().collect();
-            }
-
-            // Check for new symbols every 5 seconds
-            _ = new_symbol_check.tick() => {
-                let all_symbols = yfinance_poller.get_subscribed().await;
-                // Filter out Sierra symbols - they use Rust ClusterManager
-                let symbols: Vec<_> = all_symbols
-                    .into_iter()
-                    .filter(|s| !is_sierra_symbol(s))
-                    .collect();
-
-                // Find newly subscribed yfinance symbols
-                let new_symbols: Vec<_> = symbols
-                    .iter()
-                    .filter(|s| !processed_symbols.contains(*s))
-                    .cloned()
-                    .collect();
-
-                if !new_symbols.is_empty() {
-                    info!(
-                        "[python-pipeline] Running pipeline for {} new yfinance symbols: {:?}",
-                        new_symbols.len(),
-                        new_symbols
-                    );
-
-                    for symbol in new_symbols {
-                        match python_pipeline.run_for_ticker(&symbol).await {
-                            Ok(data) => {
-                                // Convert and broadcast clusters
-                                let clusters_data = ClustersData {
-                                    ticker: symbol.clone(),
-                                    anchor: data.anchor,
-                                    clusters: data
-                                        .clusters
-                                        .iter()
-                                        .map(|c| crate::clusters::Cluster {
-                                            side: if c.side == "bullish" {
-                                                crate::clusters::ProjectionSide::Bullish
-                                            } else {
-                                                crate::clusters::ProjectionSide::Bearish
-                                            },
-                                            low: c.low,
-                                            high: c.high,
-                                            count: 1,
-                                            unique_scenarios: 1,
-                                        })
-                                        .collect(),
-                                    nodes: vec![],
-                                    generated_at: chrono::Utc::now().to_rfc3339(),
-                                };
-                                let msg = WsOutMessage::Clusters {
-                                    ticker: symbol.clone(),
-                                    data: clusters_data,
-                                };
-                                let _ = broadcast_tx.send(msg);
-                                processed_symbols.insert(symbol.clone());
-                                info!(
-                                    "[python-pipeline] Generated {} clusters for {}",
-                                    data.clusters.len(),
-                                    symbol
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "[python-pipeline] Failed to run pipeline for {}: {}",
-                                    symbol, e
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Also remove unsubscribed symbols from processed set
-                let subscribed: HashSet<_> = symbols.into_iter().collect();
-                processed_symbols.retain(|s| subscribed.contains(s));
-            }
-        }
     }
 }

@@ -18,11 +18,9 @@ mod bar_builder;
 mod clusters;
 mod contracts;
 mod dtc;
-mod python_pipeline;
 mod scid;
 mod server;
 mod sierra_tcp;
-mod yfinance;
 
 use server::Server;
 
@@ -64,10 +62,6 @@ struct Args {
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value = "info")]
     log_level: String,
-
-    /// yfinance poll interval in seconds (for non-Sierra symbols)
-    #[arg(long, default_value = "60")]
-    yfinance_interval: u64,
 }
 
 #[tokio::main]
@@ -99,10 +93,6 @@ async fn main() -> Result<()> {
         args.ws_host, args.ws_port
     );
     info!("║  Symbols:      {:41}  ║", args.symbols);
-    info!(
-        "║  yfinance:     {}s poll interval                            ║",
-        args.yfinance_interval
-    );
     info!("╚════════════════════════════════════════════════════════════╝");
 
     // Parse symbols
@@ -122,7 +112,6 @@ async fn main() -> Result<()> {
         symbols,
         &args.sierra_data_folder,
         args.sierra_tcp_port,
-        args.yfinance_interval,
     );
 
     server.run().await

@@ -1,16 +1,15 @@
 """
 Terminal REPL for server control.
 
-Supports both DTC and yfinance streaming modes.
+Supports yfinance streaming mode with hot restart capability.
 """
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from data_streamer import DataStreamer
-    from dtc_streamer import DTCStreamer
     from pipeline_runner import PipelineRunner
     from ws_server import WebSocketServer
 
@@ -19,16 +18,15 @@ class Terminal:
     def __init__(
         self,
         server: "WebSocketServer",
-        streamer: Union["DataStreamer", "DTCStreamer"],
+        streamer: "DataStreamer",
         pipeline: "PipelineRunner",
+        on_restart: Optional[Callable[[], None]] = None,
     ):
         self.server = server
         self.streamer = streamer
         self.pipeline = pipeline
         self._running = False
-
-        # Detect streamer type
-        self._is_dtc = hasattr(streamer, "dtc_client")
+        self._on_restart = on_restart
 
     async def run(self):
         """Run the terminal REPL."""
@@ -94,26 +92,14 @@ class Terminal:
         elif cmd == "tickers":
             self._show_active_tickers()
 
-        elif cmd == "dtc":
-            self._show_dtc_status()
+        elif cmd == "restart":
+            await self._restart()
 
-        elif cmd == "bars":
+        elif cmd == "clear":
             if not args:
-                print("Usage: bars <ticker> [timeframe]")
+                print("Usage: clear <ticker> or clear cache")
             else:
-                self._show_bars(args)
-
-        elif cmd == "sub":
-            if not args:
-                print("Usage: sub <ticker>")
-            else:
-                await self._subscribe_ticker(args)
-
-        elif cmd == "unsub":
-            if not args:
-                print("Usage: unsub <ticker>")
-            else:
-                await self._unsubscribe_ticker(args)
+                await self._clear(args)
 
         elif cmd == "quit" or cmd == "exit":
             self._running = False
@@ -124,7 +110,7 @@ class Terminal:
 
     def _print_help(self):
         """Print help message."""
-        base_help = """
+        print("""
 Available commands:
   clients              List connected clients
   subscriptions, subs  Show ticker subscriptions
@@ -134,19 +120,12 @@ Available commands:
   run <ticker>         Manually trigger pipeline for ticker
   tickers              Show active tickers being streamed
   status               Server status and stats
+  restart              Hot restart the server (keeps running)
+  clear <ticker>       Clear cache for a ticker
+  clear cache          Clear all cached data
   help                 Show this help message
   quit, exit           Shutdown the server
-"""
-        dtc_help = """
-DTC Commands (Sierra Chart mode):
-  dtc                  Show DTC connection status
-  bars <ticker> [tf]   Show bar data (tf: 1m, 5m, 15m)
-  sub <ticker>         Subscribe to ticker (e.g., NQH26)
-  unsub <ticker>       Unsubscribe from ticker
-"""
-        print(base_help)
-        if self._is_dtc:
-            print(dtc_help)
+""")
 
     def _show_clients(self):
         """Show connected clients."""
@@ -223,6 +202,7 @@ DTC Commands (Sierra Chart mode):
 
     async def _run_pipeline(self, ticker: str):
         """Manually trigger pipeline for a ticker."""
+        ticker = ticker.upper()
         print(f"Running pipeline for {ticker}...")
         try:
             result = await self.pipeline.run_for_ticker(ticker)
@@ -253,22 +233,13 @@ DTC Commands (Sierra Chart mode):
         print(f"  Started: {status['started_at']}")
 
         print("\nStreamer Status:")
-        if self._is_dtc:
-            print(f"  Mode: DTC (Sierra Chart)")
-            print(f"  DTC Connected: {streamer_status.get('dtc_connected', False)}")
-            print(f"  DTC State: {streamer_status.get('dtc_state', 'unknown')}")
-            symbols = streamer_status.get("symbols", {})
-            print(f"  Subscribed symbols: {len(symbols)}")
-            for sym, info in symbols.items():
-                subscribed = "✓" if info.get("subscribed") else "○"
-                price = info.get("last_price", 0)
-                ticks = info.get("tick_count", 0)
-                print(f"    {subscribed} {sym}: ${price:.2f} ({ticks} ticks)")
-        else:
-            print(f"  Mode: yfinance")
-            active = streamer_status.get("active_tickers", [])
-            print(f"  Active tickers: {len(active)}")
-            print(f"  Poll interval: {streamer_status.get('poll_interval', 60)}s")
+        print(f"  Mode: yfinance")
+        active = streamer_status.get("active_tickers", [])
+        print(f"  Active tickers: {len(active)}")
+        if active:
+            for ticker in active:
+                print(f"    - {ticker}")
+        print(f"  Poll interval: {streamer_status.get('poll_interval', 60)}s")
 
         print("\nPipeline Status:")
         cache = self.pipeline.get_cache_status()
@@ -278,10 +249,7 @@ DTC Commands (Sierra Chart mode):
 
     def _show_active_tickers(self):
         """Show tickers being actively streamed."""
-        if self._is_dtc:
-            tickers = self.streamer.get_active_tickers()
-        else:
-            tickers = self.streamer.get_status().get("active_tickers", [])
+        tickers = self.streamer.get_status().get("active_tickers", [])
 
         if not tickers:
             print("No active tickers")
@@ -293,102 +261,25 @@ DTC Commands (Sierra Chart mode):
             print(f"  {ticker} ({subs} subscriber(s))")
         print()
 
-    def _show_dtc_status(self):
-        """Show detailed DTC connection status."""
-        if not self._is_dtc:
-            print("Not running in DTC mode")
-            return
-
-        status = self.streamer.get_status()
-        print("\nDTC Connection Status:")
-        print("-" * 50)
-        print(f"  Host: {status.get('host')}:{status.get('port')}")
-        print(f"  Connected: {status.get('dtc_connected', False)}")
-        print(f"  State: {status.get('dtc_state', 'unknown')}")
-
-        # Show symbols
-        symbols = status.get("symbols", {})
-        if symbols:
-            print(f"\nSubscribed Symbols ({len(symbols)}):")
-            for sym, info in symbols.items():
-                sierra = info.get("sierra_symbol", sym)
-                subscribed = "✓" if info.get("subscribed") else "○"
-                price = info.get("last_price", 0)
-                ticks = info.get("tick_count", 0)
-                print(f"  {subscribed} {sym} → {sierra}")
-                print(f"      Last: ${price:.2f}, Ticks: {ticks}")
-
-        # Show bar builder stats
-        bar_stats = status.get("bar_builder", {})
-        if bar_stats:
-            print(f"\nBar Builder:")
-            print(f"  Total ticks: {bar_stats.get('tick_count', 0)}")
-            print(f"  Bars closed: {bar_stats.get('bars_closed', 0)}")
-            timeframes = bar_stats.get("timeframes", [])
-            print(f"  Timeframes: {', '.join(timeframes)}")
-
-            history = bar_stats.get("history_sizes", {})
-            for sym, tfs in history.items():
-                print(f"  {sym}:")
-                for tf, count in tfs.items():
-                    print(f"    {tf}: {count} bars")
-        print()
-
-    def _show_bars(self, args: str):
-        """Show bar data for a ticker."""
-        if not self._is_dtc:
-            print("Bar data only available in DTC mode")
-            return
-
-        parts = args.split()
-        ticker = parts[0]
-        timeframe = parts[1] if len(parts) > 1 else "1m"
-
-        candles = self.streamer.get_candles(ticker, timeframe)
-        if not candles:
-            print(f"No bar data for {ticker} ({timeframe})")
-            return
-
-        print(f"\n{ticker} {timeframe} bars ({len(candles)} total, last 10):")
-        print("-" * 70)
-        print(f"  {'Time':<20} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10}")
-        print("-" * 70)
-
-        for candle in candles[-10:]:
-            ts = candle.get("time", 0) / 1000
-            time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-            print(
-                f"  {time_str:<20} "
-                f"{candle.get('open', 0):>10.2f} "
-                f"{candle.get('high', 0):>10.2f} "
-                f"{candle.get('low', 0):>10.2f} "
-                f"{candle.get('close', 0):>10.2f}"
-            )
-        print()
-
-    async def _subscribe_ticker(self, ticker: str):
-        """Subscribe to a ticker (DTC mode)."""
-        if not self._is_dtc:
-            print("Direct subscription only available in DTC mode")
-            return
-
-        ticker = ticker.upper()
-        print(f"Subscribing to {ticker}...")
-        success = await self.streamer.subscribe(ticker)
-        if success:
-            print(f"Subscribed to {ticker}")
+    async def _restart(self):
+        """Trigger a hot restart."""
+        if self._on_restart:
+            print("Initiating hot restart...")
+            self._on_restart()
         else:
-            print(f"Failed to subscribe to {ticker}")
+            print("Hot restart not available")
 
-    async def _unsubscribe_ticker(self, ticker: str):
-        """Unsubscribe from a ticker (DTC mode)."""
-        if not self._is_dtc:
-            print("Direct unsubscription only available in DTC mode")
-            return
-
-        ticker = ticker.upper()
-        await self.streamer.unsubscribe(ticker)
-        print(f"Unsubscribed from {ticker}")
+    async def _clear(self, args: str):
+        """Clear cache for a ticker or all cache."""
+        if args.lower() == "cache":
+            self.pipeline.clear_cache()
+            print("Cleared all cached data")
+        else:
+            ticker = args.upper()
+            if self.pipeline.clear_cache_for_ticker(ticker):
+                print(f"Cleared cache for {ticker}")
+            else:
+                print(f"No cache entry for {ticker}")
 
     def stop(self):
         """Stop the terminal."""

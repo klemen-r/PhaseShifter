@@ -6,14 +6,13 @@ import { AppSidebar } from "@/components/AppSidebar";
 import { CustomTrigger } from "@/components/customSideBarTrigger";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { useSidebar } from "@/components/ui/sidebar";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { calculateDonchianMidpoint, type Candle } from "@/lib/calcDonchianMid";
-import { parseCsvToCandles } from "@/lib/parseCsv";
 import {
   ExtraSettingsDialog,
   type ChartSettingsData,
@@ -53,14 +52,6 @@ function wsCandiesToChartCandles(wsCandles: WSCandle[]): Candle[] {
   }));
 }
 
-const sampleData: Candle[] = [
-  { time: "2024-11-18", open: 100, high: 110, low: 95, close: 105 },
-  { time: "2024-11-19", open: 105, high: 112, low: 101, close: 108 },
-  { time: "2024-11-20", open: 108, high: 115, low: 107, close: 112 },
-  { time: "2024-11-21", open: 112, high: 118, low: 110, close: 116 },
-  { time: "2024-11-22", open: 116, high: 120, low: 113, close: 114 },
-];
-
 type LineSettings = {
   lineColor: string;
   bgUpColor: string;
@@ -76,7 +67,6 @@ export default function NormalChartPage() {
   const { open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const [showMidpoint, setShowMidpoint] = useState(true);
   const [phase, setPhaseAmount] = useState(5);
-  const [csvData, setCsvData] = useState<Candle[]>(sampleData);
   const [settings, setSettings] = useState<LineSettings>({
     lineColor: "#A06BF3",
     bgUpColor: "#006400",
@@ -88,11 +78,6 @@ export default function NormalChartPage() {
     candleBorderDown: "#A0B4F3",
   });
   const [extraOpen, setExtraOpen] = useState(false);
-
-  // WebSocket data source - default to websocket mode
-  const [dataSource, setDataSource] = useState<"csv" | "websocket">(
-    "websocket",
-  );
 
   // Ticker with localStorage persistence
   const [wsTicker, setWsTicker] = useState(() => {
@@ -165,6 +150,8 @@ export default function NormalChartPage() {
 
   const {
     status: wsStatus,
+    pythonStatus,
+    getStatusForTicker,
     subscribedTickers,
     subscribeTicker,
     unsubscribeTicker,
@@ -176,6 +163,9 @@ export default function NormalChartPage() {
     connectedSymbols,
     tickerData,
   } = useTradingData();
+
+  // Get the appropriate connection status for current ticker
+  const connectionStatus = getStatusForTicker(wsTicker);
 
   const {
     lineColor,
@@ -193,41 +183,6 @@ export default function NormalChartPage() {
     if (openMobile) setOpenMobile(false);
   }, [open, openMobile, setOpen, setOpenMobile]);
 
-  // Load CSV data
-  useEffect(() => {
-    let active = true;
-
-    const loadCsv = async () => {
-      try {
-        const paths = ["/nq_5m.csv"];
-        let text: string | null = null;
-
-        for (const path of paths) {
-          const res = await fetch(path, { cache: "no-store" });
-          if (res.ok) {
-            text = await res.text();
-            break;
-          }
-        }
-
-        if (!text) throw new Error("Failed to load CSV data");
-
-        const parsed = parseCsvToCandles(text);
-        if (active && parsed.length > 0) {
-          setCsvData(parsed);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-
-    loadCsv();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
   // Auto-select first connected symbol when server FIRST connects (not on every ticker change)
   const hasAutoSelectedRef = useRef(false);
   useEffect(() => {
@@ -240,34 +195,20 @@ export default function NormalChartPage() {
     }
   }, [connectedSymbols, wsTicker]);
 
-  // Subscribe to ticker when switching to WebSocket mode or when ticker changes
-  useEffect(() => {
-    if (dataSource === "websocket" && wsStatus === "open" && wsTicker) {
-      if (!subscribedTickers.has(wsTicker)) {
-        subscribeTicker(wsTicker);
-      }
-    }
-  }, [dataSource, wsStatus, wsTicker, subscribedTickers, subscribeTicker]);
-
   // Get candles for current ticker - extract from tickerData for reactivity
   const tickerInfo = tickerData.get(wsTicker);
   const wsCandles = tickerInfo?.candles ?? [];
   const lastTickPrice = tickerInfo?.lastTick?.price ?? null;
 
-  // Compute chart data based on source
+  // Compute chart data from WebSocket candles
   const chartData = useMemo(() => {
-    if (dataSource === "csv") {
-      return csvData;
-    }
     return wsCandiesToChartCandles(wsCandles);
-  }, [dataSource, csvData, wsCandles]);
+  }, [wsCandles]);
 
   // Get current price for display - use lastTick price directly
   const currentPrice =
-    dataSource === "websocket"
-      ? (lastTickPrice ??
-        (wsCandles.length > 0 ? wsCandles[wsCandles.length - 1]?.close : null))
-      : null;
+    lastTickPrice ??
+    (wsCandles.length > 0 ? wsCandles[wsCandles.length - 1]?.close : null);
 
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -284,15 +225,13 @@ export default function NormalChartPage() {
                 Price Chart
               </h2>
               <div className="flex items-center gap-3">
-                {dataSource === "websocket" && currentPrice !== null && (
+                {currentPrice !== null && (
                   <span className="text-lg font-mono font-semibold text-emerald-400">
                     ${currentPrice.toFixed(2)}
                   </span>
                 )}
                 <span className="text-xs text-zinc-400">
-                  {dataSource === "csv"
-                    ? "CSV File"
-                    : `${wsTicker} (${isSierra ? "Sierra" : "yfinance"})`}
+                  {wsTicker} ({isSierra ? "Sierra" : "yfinance"})
                 </span>
                 <Button
                   variant="ghost"
@@ -318,9 +257,7 @@ export default function NormalChartPage() {
                 candleDownColor={candleDownColor}
                 candleBorderUp={candleBorderUp}
                 candleBorderDown={candleBorderDown}
-                clusters={
-                  dataSource === "websocket" ? getClusters(wsTicker) : null
-                }
+                clusters={getClusters(wsTicker)}
                 clusterOpacity={clusterOpacity}
                 clusterBullishColor={clusterBullishColor}
                 clusterBearishColor={clusterBearishColor}
@@ -338,216 +275,125 @@ export default function NormalChartPage() {
               <CardTitle className="text-base">Data Source</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex gap-2">
-                <Button
-                  variant={dataSource === "csv" ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => setDataSource("csv")}
-                  className="flex-1"
-                >
-                  CSV File
-                </Button>
-                <Button
-                  variant={dataSource === "websocket" ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => setDataSource("websocket")}
-                  className="flex-1"
-                >
-                  WebSocket
-                </Button>
-              </div>
-
-              {dataSource === "websocket" && (
-                <div className="space-y-3">
-                  <Label htmlFor="wsTicker">Ticker</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="wsTicker"
-                      value={wsTicker}
-                      onChange={(e) =>
-                        setWsTicker(e.target.value.toUpperCase())
-                      }
-                      placeholder="NQ=F"
-                      className="font-mono"
-                    />
-                    {subscribedTickers.has(wsTicker) ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => unsubscribeTicker(wsTicker)}
-                      >
-                        Unsub
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => subscribeTicker(wsTicker)}
-                        disabled={wsStatus !== "open"}
-                      >
-                        Sub
-                      </Button>
-                    )}
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2 text-xs">
-                      <Badge
-                        variant="outline"
-                        className={
-                          wsStatus === "open"
-                            ? "text-emerald-400 border-emerald-400/30"
-                            : wsStatus === "connecting"
-                              ? "text-amber-400 border-amber-400/30"
-                              : "text-zinc-400 border-zinc-400/30"
-                        }
-                      >
-                        {wsStatus}
-                      </Badge>
-                      <Badge
-                        variant="outline"
-                        className={
-                          isSierra
-                            ? "text-blue-400 border-blue-400/30"
-                            : "text-purple-400 border-purple-400/30"
-                        }
-                      >
-                        {isSierra ? "Sierra" : "yfinance"}
-                      </Badge>
-                      <span className="text-zinc-400">
-                        {wsCandles.length} candles
-                      </span>
-                      {currentPrice !== null && (
-                        <span className="text-emerald-400 font-mono">
-                          ${currentPrice.toFixed(2)}
-                        </span>
-                      )}
-                    </div>
-                    {wsStatus !== "open" && (
-                      <div className="text-xs text-amber-400">
-                        Start Rust server: cd BACKEND/phaseshifter-server &&
-                        cargo run --release -- --symbols NQ,ES
-                      </div>
-                    )}
-                    {wsStatus === "open" &&
-                      wsCandles.length === 0 &&
-                      subscribedTickers.has(wsTicker) && (
-                        <div className="text-xs text-zinc-500">
-                          {isSierra
-                            ? "Waiting for Sierra Chart data..."
-                            : "Waiting for yfinance data (updates every 60s)..."}
-                        </div>
-                      )}
-                  </div>
-                  <Separator className="bg-zinc-800" />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full"
-                    onClick={() => requestClusters(wsTicker)}
-                    disabled={wsStatus !== "open"}
-                  >
-                    Get Clusters
-                  </Button>
-
-                  {/* Auto-fetch toggle - only show if we have clusters */}
-                  {getClusters(wsTicker) && (
-                    <div className="flex items-center justify-between pt-2">
-                      <Label className="text-sm text-zinc-200">
-                        Auto-refresh (on bar close)
-                      </Label>
-                      <Switch
-                        checked={isAutoClustersEnabled(wsTicker)}
-                        onCheckedChange={(checked) => {
-                          if (checked) {
-                            enableAutoClusters(wsTicker);
-                          } else {
-                            disableAutoClusters(wsTicker);
-                          }
-                        }}
-                        disabled={wsStatus !== "open"}
-                      />
-                    </div>
+              <div className="space-y-3">
+                <Label htmlFor="wsTicker">Ticker</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="wsTicker"
+                    value={wsTicker}
+                    onChange={(e) =>
+                      setWsTicker(e.target.value.toUpperCase())
+                    }
+                    placeholder="NQ=F"
+                    className="font-mono"
+                  />
+                  {subscribedTickers.has(wsTicker) ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => unsubscribeTicker(wsTicker)}
+                    >
+                      Unsub
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => subscribeTicker(wsTicker)}
+                      disabled={connectionStatus !== "open"}
+                    >
+                      Sub
+                    </Button>
                   )}
                 </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Chart Settings Card */}
-          <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur">
-            <CardHeader className="">
-              <CardTitle className="text-base">Chart Settings</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <Label htmlFor="phase">Phase Window</Label>
-              <Input
-                id="phase"
-                type="number"
-                min={1}
-                value={phase}
-                onChange={(e) => setPhaseAmount(Number(e.target.value) || 1)}
-              />
-              <Separator className="bg-zinc-800" />
-
-              <div className="flex items-center justify-between">
-                <Label className="text-sm text-zinc-200">Auto-scale</Label>
-                <Switch defaultChecked />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <Label className="text-sm text-zinc-200">
-                  Show midpoint line
-                </Label>
-                <Switch
-                  checked={showMidpoint}
-                  onCheckedChange={setShowMidpoint}
-                />
-              </div>
-
-              {/* Cluster Opacity - only shown in WebSocket mode */}
-              {dataSource === "websocket" && (
-                <>
-                  <Separator className="bg-zinc-800" />
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm text-zinc-200">
-                        Cluster Opacity
-                      </Label>
-                      <span className="text-xs text-zinc-400">
-                        {clusterOpacity}%
-                      </span>
-                    </div>
-                    <Input
-                      type="range"
-                      min={10}
-                      max={80}
-                      value={clusterOpacity}
-                      onChange={(e) =>
-                        setClusterOpacity(Number(e.target.value))
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-xs">
+                    <Badge
+                      variant="outline"
+                      className={
+                        connectionStatus === "open"
+                          ? "text-emerald-400 border-emerald-400/30"
+                          : connectionStatus === "connecting"
+                            ? "text-amber-400 border-amber-400/30"
+                            : "text-zinc-400 border-zinc-400/30"
                       }
+                    >
+                      {connectionStatus}
+                    </Badge>
+                    <Badge
+                      variant="outline"
+                      className={
+                        isSierra
+                          ? "text-blue-400 border-blue-400/30"
+                          : "text-purple-400 border-purple-400/30"
+                      }
+                    >
+                      {isSierra ? "Sierra" : "yfinance"}
+                    </Badge>
+                    <span className="text-zinc-400">
+                      {wsCandles.length} candles
+                    </span>
+                    {currentPrice !== null && (
+                      <span className="text-emerald-400 font-mono">
+                        ${currentPrice.toFixed(2)}
+                      </span>
+                    )}
+                  </div>
+                  {connectionStatus !== "open" && (
+                    <div className="text-xs text-amber-400">
+                      {isSierra
+                        ? "Start Rust server: cd BACKEND/phaseshifter-server && cargo run --release -- --symbols NQ,ES"
+                        : "Start Python server: cd BACKEND/server && python main.py"}
+                    </div>
+                  )}
+                  {connectionStatus === "open" &&
+                    wsCandles.length === 0 &&
+                    subscribedTickers.has(wsTicker) && (
+                      <div className="text-xs text-zinc-500">
+                        {isSierra
+                          ? "Waiting for Sierra Chart data..."
+                          : "Waiting for yfinance data (updates every 60s)..."}
+                      </div>
+                    )}
+                </div>
+                <Separator className="bg-zinc-800" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => requestClusters(wsTicker)}
+                  disabled={connectionStatus !== "open"}
+                >
+                  Get Clusters
+                </Button>
+
+                {/* Auto-fetch toggle - only show if we have clusters */}
+                {getClusters(wsTicker) && (
+                  <div className="flex items-center justify-between pt-2">
+                    <Label className="text-sm text-zinc-200">
+                      Auto-refresh (on bar close)
+                    </Label>
+                    <Switch
+                      checked={isAutoClustersEnabled(wsTicker)}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          enableAutoClusters(wsTicker);
+                        } else {
+                          disableAutoClusters(wsTicker);
+                        }
+                      }}
+                      disabled={connectionStatus !== "open"}
                     />
                   </div>
-                </>
-              )}
-
-              <Separator className="bg-zinc-800" />
-
-              <Button
-                variant="secondary"
-                className="w-full justify-center"
-                onClick={() => setExtraOpen(true)}
-              >
-                Extra settings
-              </Button>
+                )}
+              </div>
             </CardContent>
           </Card>
 
-          {/* Clusters Display - only when in websocket mode */}
-          {dataSource === "websocket" && (
-            <div className="max-h-[calc(100vh-777px)]">
-              <ClustersDisplay ticker={wsTicker} data={getClusters(wsTicker)} />
-            </div>
-          )}
+          {/* Clusters Display */}
+          <div className="flex-1 overflow-auto">
+            <ClustersDisplay ticker={wsTicker} data={getClusters(wsTicker)} />
+          </div>
         </div>
       </div>
       <ExtraSettingsDialog

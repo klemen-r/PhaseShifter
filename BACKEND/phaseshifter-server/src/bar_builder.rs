@@ -412,7 +412,7 @@ impl BarBuilder {
         }
     }
 
-    /// Add a bar directly (for external data sources like yfinance)
+    /// Add a bar directly (for external data sources)
     /// This stores the bar in history without going through tick processing
     pub fn add_bar_directly(&mut self, symbol: &str, timeframe: Timeframe, bar: Bar) {
         let tf_states = self

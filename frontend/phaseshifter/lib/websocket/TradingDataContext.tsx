@@ -62,6 +62,8 @@ export interface TickerData {
   openNodes: OpenNodeInfo[];
 }
 
+export type ConnectionStatus = "open" | "closed" | "connecting" | "error";
+
 export interface TradingDataContextValue {
   // Dual-mode detection
   isSierraSymbol: (ticker: string) => boolean;
@@ -100,9 +102,15 @@ export interface TradingDataContextValue {
   connectedSymbols: string[];
   clientId: number | null;
 
-  // Connection state (pass-through from useWebSocket)
+  // Connection state - Rust server (Sierra symbols)
   status: ReturnType<typeof useWebSocket>["status"];
   lastPingMs: number | null;
+
+  // Connection state - Python server (yfinance symbols)
+  pythonStatus: ConnectionStatus;
+
+  // Helper to get appropriate status for a ticker
+  getStatusForTicker: (ticker: string) => ConnectionStatus;
 
   // Settings
   maxCandlesPerTicker: number;
@@ -143,13 +151,161 @@ function saveSubscriptions(tickers: Set<string>) {
 interface TradingDataProviderProps {
   children: ReactNode;
   maxCandles?: number;
+  pythonServerUrl?: string;
 }
 
 export function TradingDataProvider({
   children,
   maxCandles = 500,
+  pythonServerUrl = "ws://localhost:8001",
 }: TradingDataProviderProps) {
-  const { status, lastPingMs, send, subscribe } = useWebSocket();
+  const { status, lastPingMs, send, subscribe, connect } = useWebSocket();
+
+  // Python server connection state
+  const [pythonSocket, setPythonSocket] = useState<WebSocket | null>(null);
+  const [pythonStatus, setPythonStatus] = useState<"open" | "closed" | "connecting" | "error">("closed");
+  const pythonReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Connect to Python server
+  const connectPython = useCallback(() => {
+    if (pythonSocket?.readyState === WebSocket.OPEN || pythonSocket?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    setPythonStatus("connecting");
+    const ws = new WebSocket(pythonServerUrl);
+
+    ws.onopen = () => {
+      setPythonStatus("open");
+      console.log("[Python WS] Connected to", pythonServerUrl);
+    };
+
+    ws.onerror = () => {
+      setPythonStatus("error");
+    };
+
+    ws.onclose = () => {
+      setPythonStatus("closed");
+      console.log("[Python WS] Disconnected, reconnecting in 5s...");
+      pythonReconnectTimer.current = setTimeout(connectPython, 5000);
+    };
+
+    ws.onmessage = (event) => {
+      handlePythonMessage(event.data);
+    };
+
+    setPythonSocket(ws);
+  }, [pythonServerUrl]);
+
+  // Send to Python server
+  const sendToPython = useCallback((data: string | object) => {
+    if (pythonSocket?.readyState === WebSocket.OPEN) {
+      const payload = typeof data === "string" ? data : JSON.stringify(data);
+      pythonSocket.send(payload);
+    }
+  }, [pythonSocket]);
+
+  // Ref for maxCandles to use in callbacks
+  const maxCandlesRef = useRef(maxCandles);
+
+  // Helper to create default ticker data (defined early for use in callbacks)
+  const createDefaultTickerData = useCallback((): TickerData => ({
+    candles: [],
+    clusters: null,
+    lastUpdated: null,
+    lastTick: null,
+    phase: null,
+    anchor: null,
+    dm: null,
+    openNodes: [],
+  }), []);
+
+  // Handle Python server messages (defined early for use in connectPython)
+  const handlePythonMessage = useCallback((rawData: string) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawData);
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object") return;
+
+    const msg = parsed as Record<string, unknown>;
+
+    // Python server message types
+    if (msg.type === "candle") {
+      const ticker = msg.ticker as string;
+      const data = msg.data as {
+        time: number;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        volume: number;
+      };
+      const candle: WSCandle = {
+        time: data.time,
+        open: data.open,
+        high: data.high,
+        low: data.low,
+        close: data.close,
+        volume: data.volume,
+      };
+
+      setLastCandle({ ticker, candle });
+
+      setTickerData((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(ticker) ?? createDefaultTickerData();
+        const newCandles = [...existing.candles, candle];
+        if (newCandles.length > maxCandlesRef.current) {
+          newCandles.shift();
+        }
+        next.set(ticker, {
+          ...existing,
+          candles: newCandles,
+          lastUpdated: Date.now(),
+        });
+        return next;
+      });
+    } else if (msg.type === "clusters") {
+      const ticker = msg.ticker as string;
+      const data = msg.data as ClustersData;
+
+      setLastClusters({ ticker, data });
+
+      setTickerData((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(ticker) ?? createDefaultTickerData();
+        next.set(ticker, {
+          ...existing,
+          clusters: data,
+          lastUpdated: Date.now(),
+        });
+        return next;
+      });
+    } else if (msg.type === "subscribed") {
+      const ticker = msg.ticker as string;
+      setConfirmedTickers((prev) => new Set(prev).add(ticker));
+    } else if (msg.type === "unsubscribed") {
+      const ticker = msg.ticker as string;
+      setConfirmedTickers((prev) => {
+        const next = new Set(prev);
+        next.delete(ticker);
+        return next;
+      });
+    } else if (msg.type === "error") {
+      setLastError(msg.message as string);
+    } else if (msg.type === "auto_clusters_enabled") {
+      setAutoClustersEnabled((prev) => new Set(prev).add(msg.ticker as string));
+    } else if (msg.type === "auto_clusters_disabled") {
+      setAutoClustersEnabled((prev) => {
+        const next = new Set(prev);
+        next.delete(msg.ticker as string);
+        return next;
+      });
+    }
+  }, [createDefaultTickerData]);
 
   // Track which tickers we want to be subscribed to (persisted)
   const [desiredTickers, setDesiredTickers] = useState<Set<string>>(
@@ -183,7 +339,7 @@ export function TradingDataProvider({
   const [connectedSymbols, setConnectedSymbols] = useState<string[]>([]);
   const [clientId, setClientId] = useState<number | null>(null);
 
-  const maxCandlesRef = useRef(maxCandlesPerTicker);
+  // Keep maxCandlesRef in sync
   useEffect(() => {
     maxCandlesRef.current = maxCandlesPerTicker;
   }, [maxCandlesPerTicker]);
@@ -193,7 +349,19 @@ export function TradingDataProvider({
     saveSubscriptions(desiredTickers);
   }, [desiredTickers]);
 
-  // Re-subscribe to desired tickers when connection opens
+  // Connect to Python server on mount
+  useEffect(() => {
+    connectPython();
+
+    return () => {
+      if (pythonReconnectTimer.current) {
+        clearTimeout(pythonReconnectTimer.current);
+      }
+      pythonSocket?.close();
+    };
+  }, [connectPython]);
+
+  // Re-subscribe to desired tickers when Rust connection opens
   const prevStatusRef = useRef(status);
   useEffect(() => {
     const wasNotOpen = prevStatusRef.current !== "open";
@@ -201,25 +369,31 @@ export function TradingDataProvider({
     prevStatusRef.current = status;
 
     if (wasNotOpen && isNowOpen && desiredTickers.size > 0) {
-      // Connection just opened, re-subscribe to all desired tickers
+      // Connection just opened, re-subscribe Sierra symbols to Rust server
       desiredTickers.forEach((ticker) => {
-        // Python server uses 'ticker' field, not 'symbol'
-        send({ type: "subscribe", ticker });
+        if (isSierraSymbol(ticker)) {
+          send({ type: "subscribe", ticker });
+        }
       });
     }
   }, [status, desiredTickers, send]);
 
-  // Helper to create default ticker data
-  const createDefaultTickerData = (): TickerData => ({
-    candles: [],
-    clusters: null,
-    lastUpdated: null,
-    lastTick: null,
-    phase: null,
-    anchor: null,
-    dm: null,
-    openNodes: [],
-  });
+  // Re-subscribe to Python server when it connects
+  const prevPythonStatusRef = useRef(pythonStatus);
+  useEffect(() => {
+    const wasNotOpen = prevPythonStatusRef.current !== "open";
+    const isNowOpen = pythonStatus === "open";
+    prevPythonStatusRef.current = pythonStatus;
+
+    if (wasNotOpen && isNowOpen && desiredTickers.size > 0) {
+      // Python connection just opened, re-subscribe non-Sierra symbols
+      desiredTickers.forEach((ticker) => {
+        if (!isSierraSymbol(ticker)) {
+          sendToPython({ type: "subscribe", ticker });
+        }
+      });
+    }
+  }, [pythonStatus, desiredTickers, sendToPython]);
 
   // Subscribe to all WebSocket messages and route by type
   useEffect(() => {
@@ -538,13 +712,20 @@ export function TradingDataProvider({
     (ticker: string) => {
       // Add to desired tickers (persisted)
       setDesiredTickers((prev) => new Set(prev).add(ticker));
-      // Send subscribe message if connected
-      // Python server uses 'ticker' field, not 'symbol'
-      if (status === "open") {
-        send({ type: "subscribe", ticker });
+      // Route to appropriate server based on symbol type
+      if (isSierraSymbol(ticker)) {
+        // Sierra symbols (NQ, ES) -> Rust server
+        if (status === "open") {
+          send({ type: "subscribe", ticker });
+        }
+      } else {
+        // Other symbols -> Python server
+        if (pythonStatus === "open") {
+          sendToPython({ type: "subscribe", ticker });
+        }
       }
     },
-    [send, status],
+    [send, status, sendToPython, pythonStatus],
   );
 
   const unsubscribeTicker = useCallback(
@@ -555,34 +736,52 @@ export function TradingDataProvider({
         next.delete(ticker);
         return next;
       });
-      // Send unsubscribe message if connected
-      // Python server uses 'ticker' field, not 'symbol'
-      if (status === "open") {
-        send({ type: "unsubscribe", ticker });
+      // Route to appropriate server based on symbol type
+      if (isSierraSymbol(ticker)) {
+        // Sierra symbols (NQ, ES) -> Rust server
+        if (status === "open") {
+          send({ type: "unsubscribe", ticker });
+        }
+      } else {
+        // Other symbols -> Python server
+        if (pythonStatus === "open") {
+          sendToPython({ type: "unsubscribe", ticker });
+        }
       }
     },
-    [send, status],
+    [send, status, sendToPython, pythonStatus],
   );
 
   const requestClusters = useCallback(
     (ticker: string) => {
-      send({ type: "get_clusters", ticker });
+      // Route to appropriate server based on symbol type
+      if (isSierraSymbol(ticker)) {
+        send({ type: "get_clusters", ticker });
+      } else {
+        sendToPython({ type: "get_clusters", ticker });
+      }
     },
-    [send],
+    [send, sendToPython],
   );
 
   const enableAutoClusters = useCallback(
     (ticker: string) => {
-      send({ type: "enable_auto_clusters", ticker });
+      // Only supported on Python server for now
+      if (!isSierraSymbol(ticker)) {
+        sendToPython({ type: "enable_auto_clusters", ticker });
+      }
     },
-    [send],
+    [sendToPython],
   );
 
   const disableAutoClusters = useCallback(
     (ticker: string) => {
-      send({ type: "disable_auto_clusters", ticker });
+      // Only supported on Python server for now
+      if (!isSierraSymbol(ticker)) {
+        sendToPython({ type: "disable_auto_clusters", ticker });
+      }
     },
-    [send],
+    [sendToPython],
   );
 
   const isAutoClustersEnabledFn = useCallback(
@@ -648,6 +847,16 @@ export function TradingDataProvider({
     [tickerData],
   );
 
+  const getStatusForTicker = useCallback(
+    (ticker: string): ConnectionStatus => {
+      if (isSierraSymbol(ticker)) {
+        return status as ConnectionStatus;
+      }
+      return pythonStatus;
+    },
+    [status, pythonStatus],
+  );
+
   const value: TradingDataContextValue = {
     isSierraSymbol,
     subscribedTickers: desiredTickers,
@@ -674,6 +883,8 @@ export function TradingDataProvider({
     clientId,
     status,
     lastPingMs,
+    pythonStatus,
+    getStatusForTicker,
     maxCandlesPerTicker,
     setMaxCandlesPerTicker,
   };

@@ -25,7 +25,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { useWebSocket, useTradingData, type WSStatus } from "@/lib/websocket";
+import {
+  useWebSocket,
+  useTradingData,
+  isSierraSymbol,
+  type WSStatus,
+  type ConnectionStatus,
+} from "@/lib/websocket";
 import {
   SubscriptionControls,
   CandleTable,
@@ -34,7 +40,7 @@ import {
 
 export default function WebSocketDebug() {
   const {
-    status,
+    status: rustStatus,
     messages,
     lastPingMs,
     autoReconnect,
@@ -53,6 +59,8 @@ export default function WebSocketDebug() {
     requestClusters,
     getCandles,
     getClusters,
+    pythonStatus,
+    getStatusForTicker,
   } = useTradingData();
 
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
@@ -77,6 +85,9 @@ export default function WebSocketDebug() {
   const tickersArray = Array.from(subscribedTickers);
   const activeTicker = selectedTicker ?? tickersArray[0] ?? null;
 
+  // Check if at least one server is connected for subscription controls
+  const canSubscribe = rustStatus === "open" || pythonStatus === "open";
+
   return (
     <div className="flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
       <AppSidebar />
@@ -92,7 +103,7 @@ export default function WebSocketDebug() {
             onSubscribe={subscribeTicker}
             onUnsubscribe={unsubscribeTicker}
             onRequestClusters={requestClusters}
-            disabled={status !== "open"}
+            disabled={!canSubscribe}
           />
 
           {/* Ticker selector if multiple tickers */}
@@ -108,6 +119,16 @@ export default function WebSocketDebug() {
                   className="font-mono"
                 >
                   {ticker}
+                  <Badge
+                    variant="outline"
+                    className={`ml-1 text-[10px] ${
+                      isSierraSymbol(ticker)
+                        ? "text-blue-400 border-blue-400/30"
+                        : "text-purple-400 border-purple-400/30"
+                    }`}
+                  >
+                    {isSierraSymbol(ticker) ? "Rust" : "Py"}
+                  </Badge>
                 </Button>
               ))}
             </div>
@@ -154,7 +175,7 @@ export default function WebSocketDebug() {
             <TabsContent value="raw">
               <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur h-[500px]">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-base">Raw Messages</CardTitle>
+                  <CardTitle className="text-base">Raw Messages (Rust Server)</CardTitle>
                 </CardHeader>
                 <CardContent className="h-[calc(100%-56px)]">
                   <ScrollArea className="h-full pr-4">
@@ -183,13 +204,16 @@ export default function WebSocketDebug() {
         </div>
 
         {/* right: controls */}
-        <div className="w-[360px]">
+        <div className="w-[360px] space-y-4">
+          {/* Rust Server Connection */}
           <ConnectionCard
-            key={`${draftIp}-${draftPort}`}
+            title="Rust Server (Sierra)"
+            subtitle="NQ, ES, YM - Live Sierra Chart data"
+            key={`rust-${draftIp}-${draftPort}`}
             ip={draftIp}
             port={draftPort}
             currentUrl={url}
-            status={status}
+            status={rustStatus}
             lastPingMs={lastPingMs}
             autoReconnect={autoReconnect}
             setIp={setDraftIp}
@@ -199,13 +223,74 @@ export default function WebSocketDebug() {
             onPing={ping}
             onClear={clearMessages}
           />
+
+          {/* Python Server Connection */}
+          <Card className="bg-zinc-950/40 border-zinc-800 backdrop-blur">
+            <CardHeader className="space-y-1 pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base">Python Server (yfinance)</CardTitle>
+                <StatusBadge status={pythonStatus} />
+              </div>
+              <CardDescription className="text-xs text-zinc-400">
+                BTC-USD, SPY, QQQ, etc. - yfinance data (60s polling)
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-xs font-mono text-zinc-200">
+                ws://localhost:8001
+              </div>
+              <div className="text-xs text-zinc-500">
+                {pythonStatus === "open" ? (
+                  <span className="text-emerald-400">Connected and ready</span>
+                ) : pythonStatus === "connecting" ? (
+                  <span className="text-amber-400">Connecting...</span>
+                ) : (
+                  <span className="text-zinc-400">
+                    Start server: cd BACKEND/server && python main.py
+                  </span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>
   );
 }
 
+function StatusBadge({ status }: { status: ConnectionStatus | WSStatus }) {
+  const statusMeta = {
+    open: { label: "Connected", color: "bg-emerald-500", icon: Wifi },
+    connecting: { label: "Connecting", color: "bg-amber-500", icon: PlugZap },
+    closed: { label: "Closed", color: "bg-zinc-500", icon: WifiOff },
+    error: { label: "Error", color: "bg-red-500", icon: WifiOff },
+  } as const;
+
+  const SIcon = statusMeta[status].icon;
+
+  return (
+    <Badge variant="secondary" className="gap-2">
+      <motion.span
+        className={`inline-block h-2 w-2 rounded-full ${statusMeta[status].color}`}
+        animate={
+          status === "connecting"
+            ? { opacity: [0.3, 1, 0.3] }
+            : { opacity: 1 }
+        }
+        transition={{
+          duration: 1.2,
+          repeat: status === "connecting" ? Infinity : 0,
+        }}
+      />
+      <SIcon className="h-3.5 w-3.5" />
+      {statusMeta[status].label}
+    </Badge>
+  );
+}
+
 export function ConnectionCard({
+  title = "Connection Details",
+  subtitle,
   ip,
   port,
   currentUrl,
@@ -219,6 +304,8 @@ export function ConnectionCard({
   onPing,
   onClear,
 }: {
+  title?: string;
+  subtitle?: string;
   ip: string;
   port: string;
   currentUrl: string;
@@ -236,38 +323,19 @@ export function ConnectionCard({
 
   const targetUrl = useMemo(() => `${ip}${port}`, [ip, port]);
 
-  const statusMeta = {
-    open: { label: "Connected", color: "bg-emerald-500", icon: Wifi },
-    connecting: { label: "Connecting", color: "bg-amber-500", icon: PlugZap },
-    closed: { label: "Closed", color: "bg-zinc-500", icon: WifiOff },
-    error: { label: "Error", color: "bg-red-500", icon: WifiOff },
-  } as const;
-
-  const SIcon = statusMeta[status].icon;
-
   return (
-    <Card className="h-full w-full bg-zinc-950/40 border-zinc-800 backdrop-blur">
+    <Card className="w-full bg-zinc-950/40 border-zinc-800 backdrop-blur">
       <CardHeader className="space-y-1">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-base">Connection Details</CardTitle>
-
-          <Badge variant="secondary" className="gap-2">
-            <motion.span
-              className={`inline-block h-2 w-2 rounded-full ${statusMeta[status].color}`}
-              animate={
-                status === "connecting"
-                  ? { opacity: [0.3, 1, 0.3] }
-                  : { opacity: 1 }
-              }
-              transition={{
-                duration: 1.2,
-                repeat: status === "connecting" ? Infinity : 0,
-              }}
-            />
-            <SIcon className="h-3.5 w-3.5" />
-            {statusMeta[status].label}
-          </Badge>
+          <CardTitle className="text-base">{title}</CardTitle>
+          <StatusBadge status={status} />
         </div>
+
+        {subtitle && (
+          <CardDescription className="text-xs text-zinc-400">
+            {subtitle}
+          </CardDescription>
+        )}
 
         <CardDescription className="text-xs text-zinc-400">
           Current URL:{" "}

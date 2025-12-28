@@ -119,7 +119,6 @@ pub fn parse_sierra_symbol(symbol: &str) -> Option<(&str, char, i32)> {
 ///
 /// # Examples
 /// * "NQ" -> "NQH26" (auto-detect front month)
-/// * "NQ=F" -> "NQH26" (yfinance format)
 /// * "NQH26" -> "NQH26" (already Sierra format)
 /// * "NQH26-CME" -> "NQH26" (strip exchange suffix)
 pub fn to_sierra_symbol(symbol: &str) -> String {
@@ -137,15 +136,8 @@ pub fn to_sierra_symbol(symbol: &str) -> String {
         return symbol.to_string();
     }
 
-    // Strip yfinance suffix if present
-    let base = if symbol.ends_with("=F") {
-        &symbol[..symbol.len() - 2]
-    } else {
-        symbol
-    };
-
     // Get front month contract
-    get_front_month_contract(base)
+    get_front_month_contract(symbol)
 }
 
 /// Convert a symbol to full Sierra Chart format with exchange suffix

@@ -3,6 +3,8 @@ yfinance data streaming - polls for 1m candles and pushes to subscribers.
 """
 
 import asyncio
+import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,6 +16,11 @@ import yfinance as yf
 if TYPE_CHECKING:
     from ws_server import WebSocketServer
 
+logger = logging.getLogger(__name__)
+
+# Valid ticker pattern: alphanumeric, dashes, dots, equals, carets (e.g., BTC-USD, AAPL, ES=F, ^GSPC)
+VALID_TICKER_PATTERN = re.compile(r'^[A-Za-z0-9\-\.=\^]{1,20}$')
+
 
 @dataclass
 class CachedCandles:
@@ -23,11 +30,23 @@ class CachedCandles:
     interval: str      # "1m" or "5m"
 
 
+@dataclass
+class TickerError:
+    """Tracks errors for a ticker to implement backoff."""
+    error_count: int
+    last_error: float  # time.time()
+    last_message: str
+
+
 class DataStreamer:
     PRIMARY_INTERVAL = "1m"
     FALLBACK_INTERVAL = "5m"
     FLAT_RATIO_THRESHOLD = 0.9
     FLAT_MIN_SAMPLES = 30
+
+    # Error backoff settings
+    MAX_CONSECUTIVE_ERRORS = 5  # After this many errors, skip ticker for a while
+    ERROR_BACKOFF_SECONDS = 300  # Skip erroring ticker for 5 minutes
 
     def __init__(self, server: "WebSocketServer", poll_interval: int = 60, cache_ttl: int = 30):
         self.server = server
@@ -42,6 +61,51 @@ class DataStreamer:
         # Candle cache to avoid redundant yfinance calls
         self._candle_cache: dict[str, CachedCandles] = {}
         self._cache_ttl = cache_ttl  # seconds
+
+        # Track errors per ticker for backoff
+        self._ticker_errors: dict[str, TickerError] = {}
+
+    def _is_valid_ticker(self, ticker: str) -> bool:
+        """Check if ticker format is valid."""
+        if not ticker or not isinstance(ticker, str):
+            return False
+        return VALID_TICKER_PATTERN.match(ticker.strip()) is not None
+
+    def _should_skip_ticker(self, ticker: str) -> bool:
+        """Check if ticker should be skipped due to repeated errors."""
+        error_info = self._ticker_errors.get(ticker)
+        if error_info is None:
+            return False
+
+        # If too many errors and not enough time passed, skip
+        if error_info.error_count >= self.MAX_CONSECUTIVE_ERRORS:
+            elapsed = time.time() - error_info.last_error
+            if elapsed < self.ERROR_BACKOFF_SECONDS:
+                return True
+            # Backoff period passed, reset error count
+            self._ticker_errors[ticker] = TickerError(0, 0, "")
+        return False
+
+    def _record_error(self, ticker: str, message: str):
+        """Record an error for a ticker."""
+        error_info = self._ticker_errors.get(ticker)
+        if error_info:
+            self._ticker_errors[ticker] = TickerError(
+                error_count=error_info.error_count + 1,
+                last_error=time.time(),
+                last_message=message,
+            )
+        else:
+            self._ticker_errors[ticker] = TickerError(
+                error_count=1,
+                last_error=time.time(),
+                last_message=message,
+            )
+
+    def _clear_error(self, ticker: str):
+        """Clear error tracking for a ticker on success."""
+        if ticker in self._ticker_errors:
+            del self._ticker_errors[ticker]
 
     async def start(self):
         """Start the data streaming loop."""
@@ -78,12 +142,22 @@ class DataStreamer:
         loop = asyncio.get_event_loop()
 
         for ticker in tickers:
+            # Skip invalid tickers
+            if not self._is_valid_ticker(ticker):
+                logger.warning(f"Skipping invalid ticker format: {ticker}")
+                continue
+
+            # Skip tickers in error backoff
+            if self._should_skip_ticker(ticker):
+                continue
+
             try:
                 candles = await loop.run_in_executor(
                     None, lambda t=ticker: self._fetch_latest_candles(t)
                 )
 
                 if candles:
+                    self._clear_error(ticker)  # Success, clear any error tracking
                     for candle in candles:
                         await self.server.broadcast_to_ticker(
                             ticker,
@@ -94,7 +168,13 @@ class DataStreamer:
                             },
                         )
             except Exception as e:
-                print(f"[Streamer] Error fetching {ticker}: {e}")
+                error_msg = str(e)
+                self._record_error(ticker, error_msg)
+                error_info = self._ticker_errors.get(ticker)
+                if error_info and error_info.error_count >= self.MAX_CONSECUTIVE_ERRORS:
+                    logger.error(f"[Streamer] {ticker}: Too many errors, skipping for {self.ERROR_BACKOFF_SECONDS}s")
+                else:
+                    logger.warning(f"[Streamer] Error fetching {ticker}: {e}")
 
     def _fetch_latest_candles(self, ticker: str) -> list[dict]:
         """Fetch latest 1m candles from yfinance and update cache."""
@@ -153,6 +233,16 @@ class DataStreamer:
                 "valid": age <= self._cache_ttl,
             }
 
+        # Error tracking info
+        error_info = {}
+        for ticker, err in self._ticker_errors.items():
+            error_info[ticker] = {
+                "error_count": err.error_count,
+                "last_error_age": round(now - err.last_error, 1) if err.last_error else None,
+                "last_message": err.last_message[:100] if err.last_message else None,
+                "in_backoff": self._should_skip_ticker(ticker),
+            }
+
         return {
             "running": self._running,
             "poll_interval": self.poll_interval,
@@ -160,6 +250,7 @@ class DataStreamer:
             "active_tickers": list(self.server.get_all_subscribed_tickers()),
             "tracked_tickers": list(self._last_candle_time.keys()),
             "cache": cache_info,
+            "errors": error_info,
         }
 
     def clear_cache(self, ticker: str | None = None):
@@ -196,6 +287,19 @@ class DataStreamer:
 
     async def send_initial_data(self, client_id: str, ticker: str):
         """Fetch and send historical candles to a newly subscribed client."""
+        # Validate ticker format
+        if not self._is_valid_ticker(ticker):
+            logger.warning(f"Invalid ticker format: {ticker}")
+            await self.server.send_to_client(
+                client_id,
+                {
+                    "type": "error",
+                    "message": f"Invalid ticker format: {ticker}",
+                    "ticker": ticker,
+                },
+            )
+            return
+
         loop = asyncio.get_event_loop()
 
         try:
@@ -207,6 +311,7 @@ class DataStreamer:
             )
 
             if candles:
+                self._clear_error(ticker)  # Success
                 source = "cached" if from_cache else "fetched"
                 print(f"    → Sending {len(candles)} initial candles to {client_id} ({source})")
                 for candle in candles:
@@ -219,10 +324,29 @@ class DataStreamer:
                         },
                     )
             else:
+                # No data but not an error - ticker might exist but have no recent data
                 print(f"    → No candle data available for {ticker}")
+                await self.server.send_to_client(
+                    client_id,
+                    {
+                        "type": "info",
+                        "message": f"No data available for {ticker}. The symbol may be invalid or have no recent trading activity.",
+                        "ticker": ticker,
+                    },
+                )
 
         except Exception as e:
-            print(f"[Streamer] Error sending initial data for {ticker}: {e}")
+            error_msg = str(e)
+            self._record_error(ticker, error_msg)
+            logger.error(f"[Streamer] Error sending initial data for {ticker}: {e}")
+            await self.server.send_to_client(
+                client_id,
+                {
+                    "type": "error",
+                    "message": f"Failed to fetch data for {ticker}: {error_msg}",
+                    "ticker": ticker,
+                },
+            )
 
     def _fetch_all_candles(self, ticker: str) -> list[dict]:
         """Fetch all available 1m candles from yfinance (1 day), using cache if valid."""

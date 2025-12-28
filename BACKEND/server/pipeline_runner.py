@@ -544,9 +544,13 @@ class PipelineRunner:
 
         return status
 
-    def clear_cache(self, ticker: Optional[str] = None):
-        """Clear cache for a ticker or all tickers."""
-        if ticker:
-            self._cache.pop(ticker, None)
-        else:
-            self._cache.clear()
+    def clear_cache(self):
+        """Clear all cached data."""
+        self._cache.clear()
+
+    def clear_cache_for_ticker(self, ticker: str) -> bool:
+        """Clear cache for a specific ticker. Returns True if ticker was in cache."""
+        if ticker in self._cache:
+            del self._cache[ticker]
+            return True
+        return False

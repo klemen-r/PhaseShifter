@@ -6,6 +6,7 @@ export {
   TradingDataContext,
   isSierraSymbol,
 } from "./TradingDataContext";
+export type { ConnectionStatus } from "./TradingDataContext";
 export type {
   WSStatus,
   WSMessage,
