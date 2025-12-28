@@ -101,6 +101,12 @@ class Terminal:
             else:
                 await self._clear(args)
 
+        elif cmd == "unsub":
+            if not args:
+                print("Usage: unsub <ticker> or unsub all")
+            else:
+                await self._unsub(args)
+
         elif cmd == "quit" or cmd == "exit":
             self._running = False
             print("Shutting down...")
@@ -123,6 +129,8 @@ Available commands:
   restart              Hot restart the server (keeps running)
   clear <ticker>       Clear cache for a ticker
   clear cache          Clear all cached data
+  unsub <ticker>       Unsubscribe all clients from a ticker
+  unsub all            Unsubscribe all clients from all tickers
   help                 Show this help message
   quit, exit           Shutdown the server
 """)
@@ -280,6 +288,31 @@ Available commands:
                 print(f"Cleared cache for {ticker}")
             else:
                 print(f"No cache entry for {ticker}")
+
+    async def _unsub(self, args: str):
+        """Unsubscribe all clients from a ticker or all tickers."""
+        if args.lower() == "all":
+            results = await self.server.unsubscribe_all_tickers()
+            if not results:
+                print("No active subscriptions")
+            else:
+                total = sum(results.values())
+                print(f"Unsubscribed {total} client(s) from {len(results)} ticker(s):")
+                for ticker, count in sorted(results.items()):
+                    print(f"  {ticker}: {count} client(s)")
+                # Also clear cache
+                self.pipeline.clear_cache()
+                print("Also cleared all cached data")
+        else:
+            ticker = args.upper()
+            count = await self.server.unsubscribe_all_from_ticker(ticker)
+            if count > 0:
+                print(f"Unsubscribed {count} client(s) from {ticker}")
+                # Also clear cache for this ticker
+                self.pipeline.clear_cache_for_ticker(ticker)
+                print(f"Also cleared cache for {ticker}")
+            else:
+                print(f"No clients subscribed to {ticker}")
 
     def stop(self):
         """Stop the terminal."""

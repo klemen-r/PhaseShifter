@@ -18,7 +18,9 @@ class Client:
     id: str
     websocket: WebSocketServerProtocol
     subscriptions: set[str] = field(default_factory=set)
-    auto_clusters: set[str] = field(default_factory=set)  # Tickers with auto-clusters enabled
+    auto_clusters: set[str] = field(
+        default_factory=set
+    )  # Tickers with auto-clusters enabled
     connected_at: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -146,14 +148,18 @@ class WebSocketServer:
                 await self._send_error(client, "Missing ticker")
                 return
             client.auto_clusters.add(ticker)
-            await self._send(client, {"type": "auto_clusters_enabled", "ticker": ticker})
+            await self._send(
+                client, {"type": "auto_clusters_enabled", "ticker": ticker}
+            )
             print(f"    {client.id} enabled auto-clusters for {ticker}")
 
         elif msg_type == "disable_auto_clusters":
             ticker = msg.get("ticker")
             if ticker and ticker in client.auto_clusters:
                 client.auto_clusters.discard(ticker)
-                await self._send(client, {"type": "auto_clusters_disabled", "ticker": ticker})
+                await self._send(
+                    client, {"type": "auto_clusters_disabled", "ticker": ticker}
+                )
                 print(f"    {client.id} disabled auto-clusters for {ticker}")
 
         else:
@@ -263,3 +269,25 @@ class WebSocketServer:
                     summary[ticker] = []
                 summary[ticker].append(client.id)
         return summary
+
+    async def unsubscribe_all_from_ticker(self, ticker: str) -> int:
+        """Forcefully unsubscribe all clients from a ticker. Returns count of affected clients."""
+        count = 0
+        for client in list(self.clients.values()):
+            if ticker in client.subscriptions:
+                client.subscriptions.discard(ticker)
+                client.auto_clusters.discard(ticker)
+                if self.on_unsubscribe:
+                    self.on_unsubscribe(client.id, ticker)
+                await self._send(client, {"type": "unsubscribed", "ticker": ticker})
+                count += 1
+        return count
+
+    async def unsubscribe_all_tickers(self) -> dict[str, int]:
+        """Forcefully unsubscribe all clients from all tickers. Returns count per ticker."""
+        results = {}
+        all_tickers = self.get_all_subscribed_tickers()
+        for ticker in all_tickers:
+            count = await self.unsubscribe_all_from_ticker(ticker)
+            results[ticker] = count
+        return results
