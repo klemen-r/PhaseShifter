@@ -465,8 +465,8 @@ export function TradingDataProvider({
           });
         } else if (isBarUpdateMessage(parsed)) {
           // Rust server bar_update: in-progress bar changed
-          // Only process M1 timeframe for the chart
-          if (parsed.timeframe !== "1m") return;
+          // Only process M1 timeframe for the chart (server sends "M1")
+          if (parsed.timeframe !== "M1") return;
 
           const symbol = parsed.symbol;
           const candle: WSCandle = {
@@ -531,8 +531,8 @@ export function TradingDataProvider({
           });
         } else if (isBarClosedMessage(parsed)) {
           // Rust server bar_closed: bar completed, new bar started
-          // Only process M1 timeframe for the chart
-          if (parsed.timeframe !== "1m") return;
+          // Only process M1 timeframe for the chart (server sends "M1")
+          if (parsed.timeframe !== "M1") return;
 
           const symbol = parsed.symbol;
           const candle: WSCandle = {

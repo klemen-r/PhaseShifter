@@ -247,6 +247,7 @@ export default function NormalChartPage() {
             <div className="relative flex-1" onPointerDown={handleChartFocus}>
               <PriceChart
                 data={chartData}
+                ticker={wsTicker}
                 showMidpoint={showMidpoint}
                 phaseAmount={phase}
                 lineColor={lineColor}
@@ -460,6 +461,7 @@ export default function NormalChartPage() {
 
 type Props = {
   data: Candle[];
+  ticker: string; // Used to detect ticker changes for auto-centering
   showMidpoint: boolean;
   phaseAmount: number;
   lineColor: string;
@@ -491,6 +493,7 @@ const colorWithAlpha = (hex: string, alpha: number) => {
 
 export function PriceChart({
   data,
+  ticker,
   showMidpoint,
   phaseAmount,
   lineColor,
@@ -517,6 +520,7 @@ export function PriceChart({
   const clusterPrimitiveRef = useRef<ClusterRectanglesPrimitive | null>(null);
   const bgColorRef = useRef<string | null>(null);
   const [currentBg, setCurrentBg] = useState<string | null>(null);
+  const prevTickerRef = useRef<string>(ticker);
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -670,6 +674,21 @@ export function PriceChart({
   useEffect(() => {
     midpointSeriesRef.current?.applyOptions({ visible: showMidpoint });
   }, [showMidpoint]);
+
+  // Auto-center chart when ticker changes
+  useEffect(() => {
+    if (prevTickerRef.current !== ticker) {
+      prevTickerRef.current = ticker;
+      // After ticker changes and data loads, fit content to show all data
+      // Small delay to ensure data is rendered
+      const timer = setTimeout(() => {
+        if (chartRef.current && data.length > 0) {
+          chartRef.current.timeScale().fitContent();
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [ticker, data.length]);
 
   // Draw cluster rectangles
   useEffect(() => {
