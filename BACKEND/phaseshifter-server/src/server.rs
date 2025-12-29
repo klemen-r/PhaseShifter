@@ -849,8 +849,12 @@ async fn load_historical_data_scid(
                             if skipped_invalid_tick <= 3 {
                                 debug!(
                                     "Invalid tick: O={} H={} L={} C={} vol={} ts={}",
-                                    record.open, record.high, record.low, record.close,
-                                    record.total_volume, unix_ts
+                                    record.open,
+                                    record.high,
+                                    record.low,
+                                    record.close,
+                                    record.total_volume,
+                                    unix_ts
                                 );
                             }
                         } else {
@@ -859,8 +863,12 @@ async fn load_historical_data_scid(
                             if skipped_invalid_bar <= 3 {
                                 debug!(
                                     "Invalid bar: O={} H={} L={} C={} vol={} ts={}",
-                                    record.open, record.high, record.low, record.close,
-                                    record.total_volume, unix_ts
+                                    record.open,
+                                    record.high,
+                                    record.low,
+                                    record.close,
+                                    record.total_volume,
+                                    unix_ts
                                 );
                             }
                         }
@@ -1008,7 +1016,10 @@ async fn process_bar_events(
                     if bar.timeframe == "1m" {
                         trace!(
                             "[BAR_UPDATE] {} {} time={} close={:.2}",
-                            bar.symbol, bar.timeframe, bar.timestamp_ms, bar.close
+                            bar.symbol,
+                            bar.timeframe,
+                            bar.timestamp_ms,
+                            bar.close
                         );
                     }
                     // Broadcast bar update
@@ -1145,6 +1156,22 @@ async fn process_bar_events(
                                         extreme,
                                         bar.timestamp_ms
                                     );
+
+                                    // Recalculate and broadcast clusters on phase flip
+                                    {
+                                        let mut cm = cluster_manager.write().await;
+                                        if let Some(data) = cm.get_clusters(&bar.symbol) {
+                                            let clusters_msg = WsOutMessage::Clusters {
+                                                ticker: bar.symbol.clone(),
+                                                data,
+                                            };
+                                            let _ = broadcast_tx.send(clusters_msg);
+                                            info!(
+                                                "Broadcast clusters for {} after phase flip",
+                                                bar.symbol
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

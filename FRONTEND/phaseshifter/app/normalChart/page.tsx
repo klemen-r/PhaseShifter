@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Settings } from "lucide-react";
+import { toast } from "sonner";
 
 import { AppSidebar } from "@/components/AppSidebar";
 import { CustomTrigger } from "@/components/customSideBarTrigger";
@@ -66,7 +67,7 @@ type LineSettings = {
 export default function NormalChartPage() {
   const { open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const [showMidpoint, setShowMidpoint] = useState(true);
-  const [phase, setPhaseAmount] = useState(5);
+  const [phase, setPhaseAmount] = useState(240);
   const [settings, setSettings] = useState<LineSettings>({
     lineColor: "#A06BF3",
     bgUpColor: "#006400",
@@ -98,13 +99,14 @@ export default function NormalChartPage() {
   const isSierra = useMemo(() => isSierraSymbol(wsTicker), [wsTicker]);
 
   // Cluster display settings
-  const [clusterOpacity, setClusterOpacity] = useState(25); // 10-80%
+  const [clusterOpacity, setClusterOpacity] = useState(67); // 0-100%
   const [clusterBullishColor, setClusterBullishColor] = useState("#22c55e");
   const [clusterBearishColor, setClusterBearishColor] = useState("#ef4444");
   const [clusterBorderColor, setClusterBorderColor] = useState("#ffffff");
   const [clusterBorderStyle, setClusterBorderStyle] = useState<
     "solid" | "dashed" | "none"
-  >("dashed");
+  >("none");
+  const [clusterAlerts, setClusterAlerts] = useState(false); // off by default
 
   // Preset management
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>([]);
@@ -131,6 +133,9 @@ export default function NormalChartPage() {
     setClusterBearishColor(preset.clusterBearishColor);
     setClusterBorderColor(preset.clusterBorderColor);
     setClusterBorderStyle(preset.clusterBorderStyle);
+    if (preset.clusterAlerts !== undefined) {
+      setClusterAlerts(preset.clusterAlerts);
+    }
     setSettings({
       lineColor: preset.lineColor,
       bgUpColor: preset.bgUpColor,
@@ -210,6 +215,98 @@ export default function NormalChartPage() {
     lastTickPrice ??
     (wsCandles.length > 0 ? wsCandles[wsCandles.length - 1]?.close : null);
 
+  // Get clusters once for both chart and alerts
+  const clusters = useMemo(
+    () => getClusters(wsTicker),
+    [getClusters, wsTicker],
+  );
+
+  // Cluster zone alerts - track which clusters price is currently inside
+  const inClusterRef = useRef<Set<string>>(new Set());
+  const lastAlertTimeRef = useRef<number>(0);
+  const initializedRef = useRef<boolean>(false);
+  const prevTickerForAlertsRef = useRef<string>("");
+  const prevClustersRef = useRef<typeof clusters>(null);
+
+  // Cluster zone alert - check when price changes
+  useEffect(() => {
+    if (
+      !clusterAlerts ||
+      currentPrice === null ||
+      !clusters?.clusters?.length
+    ) {
+      return;
+    }
+
+    // Reset on ticker change
+    if (prevTickerForAlertsRef.current !== wsTicker) {
+      prevTickerForAlertsRef.current = wsTicker;
+      inClusterRef.current.clear();
+      initializedRef.current = false;
+    }
+
+    // Reset on clusters change (phase flip created new clusters)
+    if (prevClustersRef.current !== clusters) {
+      prevClustersRef.current = clusters;
+      inClusterRef.current.clear();
+      initializedRef.current = false;
+    }
+
+    // Single pass: check all clusters, build set of current keys
+    const nowInKeys = new Set<string>();
+    let enteredCluster: {
+      key: string;
+      side: string;
+      low: number;
+      high: number;
+    } | null = null;
+
+    for (const cluster of clusters.clusters) {
+      const key = `${cluster.side}:${cluster.low.toFixed(2)}-${cluster.high.toFixed(2)}`;
+
+      if (currentPrice >= cluster.low && currentPrice <= cluster.high) {
+        nowInKeys.add(key);
+
+        // Check if new entry (not first run, not already tracked)
+        if (
+          initializedRef.current &&
+          !inClusterRef.current.has(key) &&
+          !enteredCluster
+        ) {
+          enteredCluster = {
+            key,
+            side: cluster.side,
+            low: cluster.low,
+            high: cluster.high,
+          };
+        }
+      }
+    }
+
+    // First run: record state, no alerts
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      inClusterRef.current = nowInKeys;
+      return;
+    }
+
+    // Update tracking state
+    inClusterRef.current = nowInKeys;
+
+    // Alert on entry (debounced)
+    if (enteredCluster) {
+      const now = Date.now();
+      if (now - lastAlertTimeRef.current >= 1000) {
+        lastAlertTimeRef.current = now;
+        const side = enteredCluster.side === "bullish" ? "Bullish" : "Bearish";
+        toast.info(`${wsTicker} entered ${side} zone`, {
+          description: `Price ${currentPrice.toFixed(2)} in cluster ${enteredCluster.low.toFixed(2)} - ${enteredCluster.high.toFixed(2)}`,
+          duration: 5000,
+        });
+      }
+    }
+  }, [clusterAlerts, currentPrice, clusters, wsTicker]);
+
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
       <AppSidebar />
@@ -258,7 +355,7 @@ export default function NormalChartPage() {
                 candleDownColor={candleDownColor}
                 candleBorderUp={candleBorderUp}
                 candleBorderDown={candleBorderDown}
-                clusters={getClusters(wsTicker)}
+                clusters={clusters}
                 clusterOpacity={clusterOpacity}
                 clusterBullishColor={clusterBullishColor}
                 clusterBearishColor={clusterBearishColor}
@@ -282,9 +379,7 @@ export default function NormalChartPage() {
                   <Input
                     id="wsTicker"
                     value={wsTicker}
-                    onChange={(e) =>
-                      setWsTicker(e.target.value.toUpperCase())
-                    }
+                    onChange={(e) => setWsTicker(e.target.value.toUpperCase())}
                     placeholder="NQ=F"
                     className="font-mono"
                   />
@@ -369,7 +464,7 @@ export default function NormalChartPage() {
                 </Button>
 
                 {/* Auto-fetch toggle - only show if we have clusters */}
-                {getClusters(wsTicker) && (
+                {clusters && (
                   <div className="flex items-center justify-between pt-2">
                     <Label className="text-sm text-zinc-200">
                       Auto-refresh (on bar close)
@@ -393,7 +488,7 @@ export default function NormalChartPage() {
 
           {/* Clusters Display */}
           <div className="flex-1 overflow-auto">
-            <ClustersDisplay ticker={wsTicker} data={getClusters(wsTicker)} />
+            <ClustersDisplay ticker={wsTicker} data={clusters} />
           </div>
         </div>
       </div>
@@ -416,6 +511,8 @@ export default function NormalChartPage() {
         setClusterBorderColor={setClusterBorderColor}
         clusterBorderStyle={clusterBorderStyle}
         setClusterBorderStyle={setClusterBorderStyle}
+        clusterAlerts={clusterAlerts}
+        setClusterAlerts={setClusterAlerts}
         // Midpoint colors
         lineColor={lineColor}
         setLineColor={(val) =>
@@ -675,17 +772,24 @@ export function PriceChart({
     midpointSeriesRef.current?.applyOptions({ visible: showMidpoint });
   }, [showMidpoint]);
 
-  // Auto-center chart when ticker changes
+  // Auto-center chart when ticker changes - adjust both time and price scales
   useEffect(() => {
     if (prevTickerRef.current !== ticker) {
       prevTickerRef.current = ticker;
-      // After ticker changes and data loads, fit content to show all data
-      // Small delay to ensure data is rendered
       const timer = setTimeout(() => {
-        if (chartRef.current && data.length > 0) {
+        if (chartRef.current && candleSeriesRef.current && data.length > 0) {
+          // Reset price scale to fit new ticker's price range
+          chartRef.current.priceScale("right").applyOptions({
+            autoScale: true,
+          });
+          // Set right offset for empty space on right side
+          chartRef.current.timeScale().applyOptions({
+            rightOffset: 100,
+          });
+          // Fit all content (shows all candles + right offset)
           chartRef.current.timeScale().fitContent();
         }
-      }, 100);
+      }, 200);
       return () => clearTimeout(timer);
     }
   }, [ticker, data.length]);

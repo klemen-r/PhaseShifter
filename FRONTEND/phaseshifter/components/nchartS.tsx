@@ -23,6 +23,7 @@ export type ChartSettingsData = {
   clusterBearishColor: string;
   clusterBorderColor: string;
   clusterBorderStyle: "solid" | "dashed" | "none";
+  clusterAlerts: boolean;
   lineColor: string;
   bgUpColor: string;
   bgDownColor: string;
@@ -61,6 +62,8 @@ type ExtraSettingsDialogProps = {
   setClusterBorderColor: (val: string) => void;
   clusterBorderStyle: "solid" | "dashed" | "none";
   setClusterBorderStyle: (val: "solid" | "dashed" | "none") => void;
+  clusterAlerts: boolean;
+  setClusterAlerts: (val: boolean) => void;
 
   // Midpoint colors
   lineColor: string;
@@ -139,6 +142,12 @@ const settingItems: SettingItem[] = [
     keywords: ["cluster", "border", "style", "solid", "dashed", "none"],
   },
   {
+    id: "clusterAlerts",
+    label: "Cluster Entry Alerts",
+    category: "Clusters",
+    keywords: ["cluster", "alert", "notification", "sound", "entry"],
+  },
+  {
     id: "lineColor",
     label: "Midpoint Line Color",
     category: "Midpoint",
@@ -205,6 +214,8 @@ export function ExtraSettingsDialog({
   setClusterBorderColor,
   clusterBorderStyle,
   setClusterBorderStyle,
+  clusterAlerts,
+  setClusterAlerts,
   lineColor,
   setLineColor,
   bgUpColor,
@@ -258,6 +269,7 @@ export function ExtraSettingsDialog({
       clusterBearishColor,
       clusterBorderColor,
       clusterBorderStyle,
+      clusterAlerts,
       lineColor,
       bgUpColor,
       bgDownColor,
@@ -275,6 +287,7 @@ export function ExtraSettingsDialog({
       clusterBearishColor,
       clusterBorderColor,
       clusterBorderStyle,
+      clusterAlerts,
       lineColor,
       bgUpColor,
       bgDownColor,
@@ -561,6 +574,20 @@ export function ExtraSettingsDialog({
                   </div>
                 )}
               </div>
+              {isVisible("clusterAlerts") && (
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label className="text-zinc-200">Cluster Zone Alerts</Label>
+                    <p className="text-xs text-zinc-500">
+                      Notify when price enters a cluster zone
+                    </p>
+                  </div>
+                  <Switch
+                    checked={clusterAlerts}
+                    onCheckedChange={setClusterAlerts}
+                  />
+                </div>
+              )}
               {isCategoryVisible("Clusters") && (
                 <Separator className="bg-zinc-800" />
               )}
