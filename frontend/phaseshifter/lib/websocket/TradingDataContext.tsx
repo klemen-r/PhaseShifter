@@ -401,17 +401,7 @@ export function TradingDataProvider({
       () => true, // Accept all messages
       (msg: WSMessage) => {
         const parsed = parseServerMessage(msg.data);
-        if (!parsed) {
-          console.log(`[WS] Unparseable message:`, msg.data);
-          return;
-        }
-
-        // Log all message types for debugging
-        const msgType = (parsed as { type?: string }).type;
-        if (msgType && !["tick"].includes(msgType)) {
-          // Skip tick spam, but log everything else
-          console.log(`[WS] Message type: ${msgType}`);
-        }
+        if (!parsed) return;
 
         // ============================================
         // Rust Server Messages
@@ -419,14 +409,12 @@ export function TradingDataProvider({
 
         if (isConnectedMessage(parsed)) {
           // Handle connection from Rust server
-          console.log(`[WS] connected: client_id=${parsed.client_id}, symbols=${parsed.symbols.join(", ")}`);
           setClientId(parsed.client_id);
           setConnectedSymbols(parsed.symbols);
           // Auto-add connected symbols to desired tickers and request history
           parsed.symbols.forEach((symbol) => {
             setDesiredTickers((prev) => new Set(prev).add(symbol));
             // Request historical bars for 1m timeframe (server expects lowercase)
-            console.log(`[WS] Requesting history for ${symbol}`);
             send({ type: "get_history", symbol, timeframe: "1m", limit: 500 });
           });
         } else if (isTickMessage(parsed)) {
@@ -478,11 +466,7 @@ export function TradingDataProvider({
         } else if (isBarUpdateMessage(parsed)) {
           // Rust server bar_update: in-progress bar changed
           // Only process 1m timeframe for the chart (server sends lowercase "1m")
-          console.log(`[WS] bar_update received: symbol=${parsed.symbol}, timeframe=${parsed.timeframe}, time=${parsed.time}`);
-          if (parsed.timeframe !== "1m") {
-            console.log(`[WS] bar_update SKIPPED: timeframe ${parsed.timeframe} !== "1m"`);
-            return;
-          }
+          if (parsed.timeframe !== "1m") return;
 
           const symbol = parsed.symbol;
           const candle: WSCandle = {
@@ -515,18 +499,14 @@ export function TradingDataProvider({
             // Find existing candle with same timestamp
             const existingIdx = candles.findIndex((c) => c.time === candle.time);
 
-            let action: string;
             if (existingIdx >= 0) {
               // Update existing candle at found index
-              action = `UPDATE@${existingIdx}`;
               candles[existingIdx] = candle;
             } else if (candles.length === 0) {
               // First candle
-              action = "FIRST";
               candles.push(candle);
             } else if (lastTime !== null && lastTime < candle.time) {
               // New bar, append
-              action = "PUSH";
               candles.push(candle);
               if (candles.length > maxCandlesRef.current) {
                 candles.shift();
@@ -542,17 +522,11 @@ export function TradingDataProvider({
                   insertIdx = 0;
                 }
               }
-              action = `INSERT@${insertIdx}`;
               candles.splice(insertIdx, 0, candle);
               if (candles.length > maxCandlesRef.current) {
                 candles.shift();
               }
             }
-
-            console.log(
-              `[BAR_UPDATE] ${symbol} - time=${candle.time}, lastTime=${lastTime}, ` +
-              `candleCount=${candles.length}, action=${action}`,
-            );
 
             next.set(symbol, {
               ...existing,
@@ -565,11 +539,7 @@ export function TradingDataProvider({
         } else if (isBarClosedMessage(parsed)) {
           // Rust server bar_closed: bar completed, new bar started
           // Only process 1m timeframe for the chart (server sends lowercase "1m")
-          console.log(`[WS] bar_closed received: symbol=${parsed.symbol}, timeframe=${parsed.timeframe}, time=${parsed.time}, OHLC=[${parsed.open}, ${parsed.high}, ${parsed.low}, ${parsed.close}]`);
-          if (parsed.timeframe !== "1m") {
-            console.log(`[WS] bar_closed SKIPPED: timeframe ${parsed.timeframe} !== "1m"`);
-            return;
-          }
+          if (parsed.timeframe !== "1m") return;
 
           const symbol = parsed.symbol;
           const candle: WSCandle = {
@@ -588,21 +558,11 @@ export function TradingDataProvider({
             const existing = next.get(symbol) ?? createDefaultTickerData();
             const candles = [...existing.candles];
 
-            const lastCandleTime = candles.length > 0 ? candles[candles.length - 1].time : null;
-            console.log(
-              `[BAR_CLOSED] ${symbol} - New bar time: ${candle.time} (${new Date(candle.time).toISOString()}), ` +
-              `Last candle time: ${lastCandleTime} (${lastCandleTime ? new Date(lastCandleTime).toISOString() : 'none'}), ` +
-              `Total candles: ${candles.length}`,
-            );
-
             // Find existing candle with same timestamp
             const existingIdx = candles.findIndex(
               (c) => c.time === candle.time,
             );
             if (existingIdx >= 0) {
-              console.log(
-                `[BAR_CLOSED] ${symbol} - Updating existing at index ${existingIdx}`,
-              );
               candles[existingIdx] = candle;
             } else {
               // Insert at correct position (sorted by time) - don't skip!
@@ -616,7 +576,6 @@ export function TradingDataProvider({
                   insertIdx = 0;
                 }
               }
-              console.log(`[BAR_CLOSED] ${symbol} - Inserting at index ${insertIdx} (candle count: ${candles.length})`);
               candles.splice(insertIdx, 0, candle);
               if (candles.length > maxCandlesRef.current) {
                 candles.shift();
@@ -674,12 +633,6 @@ export function TradingDataProvider({
         } else if (isHistoryMessage(parsed)) {
           // Rust server history: historical bars
           const symbol = parsed.symbol;
-          console.log(`[WS] history received: symbol=${symbol}, timeframe=${parsed.timeframe}, bars=${parsed.bars.length}`);
-          if (parsed.bars.length > 0) {
-            const first = parsed.bars[0];
-            const last = parsed.bars[parsed.bars.length - 1];
-            console.log(`[WS] history range: first=${new Date(first.time).toISOString()}, last=${new Date(last.time).toISOString()}`);
-          }
           const candles: WSCandle[] = parsed.bars.map((bar) => ({
             time: bar.time,
             open: bar.open,
@@ -692,7 +645,6 @@ export function TradingDataProvider({
           setTickerData((prev) => {
             const next = new Map(prev);
             const existing = next.get(symbol) ?? createDefaultTickerData();
-            console.log(`[WS] history storing ${candles.length} candles for ${symbol} (had ${existing.candles.length} before)`);
             next.set(symbol, {
               ...existing,
               candles,

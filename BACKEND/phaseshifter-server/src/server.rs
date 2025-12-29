@@ -956,6 +956,13 @@ async fn process_bar_events(
     while let Some(event) = bar_event_rx.recv().await {
         match event {
             BarEvent::Updated(bar) => {
+                // Log 1m bar updates at trace level (very frequent - every tick)
+                if bar.timeframe == "1m" {
+                    trace!(
+                        "[BAR_UPDATE] {} {} time={} close={:.2}",
+                        bar.symbol, bar.timeframe, bar.timestamp_ms, bar.close
+                    );
+                }
                 // Broadcast bar update
                 let msg = WsOutMessage::BarUpdate {
                     symbol: bar.symbol.clone(),
@@ -970,6 +977,13 @@ async fn process_bar_events(
                 let _ = broadcast_tx.send(msg);
             }
             BarEvent::Closed(bar) => {
+                // Log 1m bar closes (time only)
+                if bar.timeframe == "1m" {
+                    info!(
+                        "[BAR_CLOSED] {} {} time={}",
+                        bar.symbol, bar.timeframe, bar.timestamp_ms
+                    );
+                }
                 // Broadcast bar closed
                 let msg = WsOutMessage::BarClosed {
                     symbol: bar.symbol.clone(),
