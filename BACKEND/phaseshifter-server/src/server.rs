@@ -1180,6 +1180,10 @@ async fn process_bar_events(
                     // After processing all scenarios for this timeframe,
                     // update cluster manager with bar data for each scenario.
                     // Each scenario uses its own anchor to check node closures.
+                    //
+                    // First, collect anchors from engines (read locks), then update
+                    // cluster manager once (single write lock) to avoid lock thrashing.
+                    let mut scenario_anchors: Vec<(Timeframe, usize, f64)> = Vec::new();
                     for &(scenario_tf, phase_window) in &scenarios {
                         if scenario_tf != tf {
                             continue;
@@ -1188,16 +1192,40 @@ async fn process_bar_events(
                         if let Some(engine_state) = engines.get(&key) {
                             let state = engine_state.read().await;
                             if let Some(anchor) = state.engine.current_anchor() {
-                                let mut cm = cluster_manager.write().await;
-                                cm.update_scenario_with_bar(
-                                    &bar.symbol,
-                                    tf.as_str(),
-                                    phase_window,
-                                    anchor,
-                                    bar.high,
-                                    bar.low,
-                                    bar.timestamp_ms,
-                                );
+                                scenario_anchors.push((scenario_tf, phase_window, anchor));
+                            }
+                        }
+                    }
+
+                    // Single write lock for all cluster manager updates
+                    if !scenario_anchors.is_empty() {
+                        let mut cm = cluster_manager.write().await;
+                        let mut any_nodes_closed = false;
+
+                        for (scenario_tf, phase_window, anchor) in scenario_anchors {
+                            let closed_count = cm.update_scenario_with_bar(
+                                &bar.symbol,
+                                scenario_tf.as_str(),
+                                phase_window,
+                                anchor,
+                                bar.high,
+                                bar.low,
+                                bar.timestamp_ms,
+                            );
+                            if closed_count > 0 {
+                                any_nodes_closed = true;
+                            }
+                        }
+
+                        // Broadcast updated clusters when nodes close (target hit)
+                        if any_nodes_closed {
+                            if let Some(data) = cm.get_clusters(&bar.symbol) {
+                                let clusters_msg = WsOutMessage::Clusters {
+                                    ticker: bar.symbol.clone(),
+                                    data,
+                                };
+                                let _ = broadcast_tx.send(clusters_msg);
+                                info!("Broadcast clusters for {} after node(s) closed", bar.symbol);
                             }
                         }
                     }
