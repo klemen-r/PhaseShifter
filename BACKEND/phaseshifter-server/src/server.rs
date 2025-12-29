@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -217,6 +218,10 @@ impl Server {
         let clients: Arc<DashMap<ClientId, ClientState>> = Arc::new(DashMap::new());
         let next_client_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
+        // Live mode flag - false during historical loading, true after
+        // This prevents flooding clients with millions of historical bar events
+        let live_mode = Arc::new(AtomicBool::new(false));
+
         // Broadcast channel for all events
         let (broadcast_tx, _) = broadcast::channel::<WsOutMessage>(10000);
 
@@ -315,6 +320,7 @@ impl Server {
         let cluster_manager_bar = cluster_manager.clone();
         let scenarios_bar = scenarios.clone();
         let broadcast_tx_bar = broadcast_tx.clone();
+        let live_mode_bar = live_mode.clone();
         tokio::spawn(async move {
             process_bar_events(
                 bar_event_rx,
@@ -322,6 +328,7 @@ impl Server {
                 cluster_manager_bar,
                 scenarios_bar,
                 broadcast_tx_bar,
+                live_mode_bar,
             )
             .await;
         });
@@ -338,12 +345,14 @@ impl Server {
         let sierra_symbols_for_hist = sierra_symbols.clone();
         let base_symbols_for_hist = self.symbols.clone();
         let bar_builder_for_hist = bar_builder.clone();
+        let live_mode_hist = live_mode.clone();
         tokio::spawn(async move {
             load_historical_data_scid(
                 &sierra_data_folder,
                 sierra_symbols_for_hist,
                 base_symbols_for_hist,
                 bar_builder_for_hist,
+                live_mode_hist,
             )
             .await;
         });
@@ -694,6 +703,7 @@ async fn load_historical_data_scid(
     sierra_symbols: Vec<String>,
     base_symbols: Vec<String>,
     bar_builder: Arc<RwLock<BarBuilder>>,
+    live_mode: Arc<AtomicBool>,
 ) {
     use std::path::Path;
 
@@ -847,11 +857,15 @@ async fn load_historical_data_scid(
     info!("Historical data loading complete");
 
     // Enable live mode now that historical loading is done
-    // This enables SCID verification for closed bars
+    // This enables SCID verification for closed bars AND broadcasting to clients
     {
         let mut builder = bar_builder.write().await;
         builder.set_live_mode(true);
     }
+
+    // Set the shared live_mode flag so process_bar_events starts broadcasting
+    live_mode.store(true, Ordering::Relaxed);
+    info!("Live mode enabled - bar events will now be broadcast to clients");
 }
 
 /// Process historical bars from DTC and inject as synthetic ticks
@@ -952,48 +966,57 @@ async fn process_bar_events(
     cluster_manager: Arc<RwLock<ClusterManager>>,
     scenarios: Vec<(Timeframe, usize)>,
     broadcast_tx: broadcast::Sender<WsOutMessage>,
+    live_mode: Arc<AtomicBool>,
 ) {
     while let Some(event) = bar_event_rx.recv().await {
+        // Only broadcast to clients when in live mode (after historical loading)
+        let is_live = live_mode.load(Ordering::Relaxed);
+
         match event {
             BarEvent::Updated(bar) => {
-                // Log 1m bar updates at trace level (very frequent - every tick)
-                if bar.timeframe == "1m" {
-                    trace!(
-                        "[BAR_UPDATE] {} {} time={} close={:.2}",
-                        bar.symbol, bar.timeframe, bar.timestamp_ms, bar.close
-                    );
+                // Only broadcast bar updates in live mode
+                if is_live {
+                    // Log 1m bar updates at trace level (very frequent - every tick)
+                    if bar.timeframe == "1m" {
+                        trace!(
+                            "[BAR_UPDATE] {} {} time={} close={:.2}",
+                            bar.symbol, bar.timeframe, bar.timestamp_ms, bar.close
+                        );
+                    }
+                    // Broadcast bar update
+                    let msg = WsOutMessage::BarUpdate {
+                        symbol: bar.symbol.clone(),
+                        timeframe: bar.timeframe.clone(),
+                        timestamp_ms: bar.timestamp_ms,
+                        open: bar.open,
+                        high: bar.high,
+                        low: bar.low,
+                        close: bar.close,
+                        volume: bar.volume,
+                    };
+                    let _ = broadcast_tx.send(msg);
                 }
-                // Broadcast bar update
-                let msg = WsOutMessage::BarUpdate {
-                    symbol: bar.symbol.clone(),
-                    timeframe: bar.timeframe.clone(),
-                    timestamp_ms: bar.timestamp_ms,
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
-                    volume: bar.volume,
-                };
-                let _ = broadcast_tx.send(msg);
             }
             BarEvent::Closed(bar) => {
-                // Log ALL bar closes to debug
-                info!(
-                    "[BAR_CLOSED] {} tf={} time={}",
-                    bar.symbol, bar.timeframe, bar.timestamp_ms
-                );
-                // Broadcast bar closed
-                let msg = WsOutMessage::BarClosed {
-                    symbol: bar.symbol.clone(),
-                    timeframe: bar.timeframe.clone(),
-                    timestamp_ms: bar.timestamp_ms,
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
-                    volume: bar.volume,
-                };
-                let _ = broadcast_tx.send(msg);
+                // Only broadcast and log bar closes in live mode
+                if is_live {
+                    info!(
+                        "[BAR_CLOSED] {} tf={} time={}",
+                        bar.symbol, bar.timeframe, bar.timestamp_ms
+                    );
+                    // Broadcast bar closed
+                    let msg = WsOutMessage::BarClosed {
+                        symbol: bar.symbol.clone(),
+                        timeframe: bar.timeframe.clone(),
+                        timestamp_ms: bar.timestamp_ms,
+                        open: bar.open,
+                        high: bar.high,
+                        low: bar.low,
+                        close: bar.close,
+                        volume: bar.volume,
+                    };
+                    let _ = broadcast_tx.send(msg);
+                }
 
                 // Feed closed bar to all matching PhaseEngines (different phase_windows)
                 if let Some(tf) = Timeframe::from_str(&bar.timeframe) {
