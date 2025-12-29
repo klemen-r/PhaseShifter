@@ -114,9 +114,6 @@ export function useWebSocket(
     if (filter) {
       return filteredMessages;
     }
-    console.log(
-      context.messages.filter((msg) => msg.connectionId === connectionId),
-    );
     return context.messages.filter((msg) => msg.connectionId === connectionId);
   }, [filter, filteredMessages, context.messages, connectionId]);
 
