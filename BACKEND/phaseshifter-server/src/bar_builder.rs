@@ -4,6 +4,7 @@
 //! Uses lock-free data structures for high-performance tick processing.
 //! Supports async SCID verification of closed bars.
 
+use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -313,7 +314,9 @@ impl BarBuilder {
     /// Process a tick
     pub async fn on_tick(&mut self, tick: &Tick) {
         self.tick_count += 1;
-        let timestamp_ms = (tick.timestamp * 1000.0) as i64;
+        // Use server's system time instead of tick timestamp for bar boundaries
+        // This ensures bars close reliably even if tick timestamps are delayed/wrong
+        let timestamp_ms = Utc::now().timestamp_millis();
 
         // Ensure symbol states exist
         let tf_states = self.states.entry(tick.symbol.clone()).or_insert_with(|| {
