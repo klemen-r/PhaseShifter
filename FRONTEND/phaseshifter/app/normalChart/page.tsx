@@ -299,6 +299,12 @@ export default function NormalChartPage() {
       if (now - lastAlertTimeRef.current >= 1000) {
         lastAlertTimeRef.current = now;
         const side = enteredCluster.side === "bullish" ? "Bullish" : "Bearish";
+
+        // Play sound
+        const audio = new Audio("/notification.mp3");
+        audio.volume = 1;
+        audio.play().catch(() => {}); // Ignore if audio fails
+
         toast.info(`${wsTicker} entered ${side} zone`, {
           description: `Price ${currentPrice.toFixed(2)} in cluster ${enteredCluster.low.toFixed(2)} - ${enteredCluster.high.toFixed(2)}`,
           duration: 5000,
@@ -383,6 +389,7 @@ export default function NormalChartPage() {
                     placeholder="NQ=F"
                     className="font-mono"
                   />
+
                   {subscribedTickers.has(wsTicker) ? (
                     <Button
                       variant="ghost"
@@ -783,7 +790,7 @@ export function PriceChart({
     if (prevTickerRef.current !== ticker) {
       prevTickerRef.current = ticker;
       const timer = setTimeout(() => {
-        if (chartRef.current && candleSeriesRef.current && data.length > 0) {
+        if (chartRef.current && candleSeriesRef.current) {
           // Reset price scale to fit new ticker's price range
           chartRef.current.priceScale("right").applyOptions({
             autoScale: true,
@@ -798,7 +805,7 @@ export function PriceChart({
       }, 200);
       return () => clearTimeout(timer);
     }
-  }, [ticker, data.length]);
+  }, [ticker]);
 
   // Draw cluster rectangles
   useEffect(() => {
