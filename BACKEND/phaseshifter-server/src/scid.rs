@@ -173,17 +173,26 @@ impl ScidRecord {
     }
 
     /// Check if this is a valid tick record
+    /// Sierra Chart stores ticks with open=0, close=trade price
+    /// Bid/ask only updates have close=0 (no trade), we skip those
     pub fn is_valid_tick(&self) -> bool {
         if !self.is_single_trade() {
             return false;
         }
 
         // For tick records, close is the trade price
+        // close=0 means this is a bid/ask update without a trade - skip it
         if !self.close.is_finite() || self.close <= 0.0 {
             return false;
         }
 
         true
+    }
+
+    /// Check if this is a bid/ask only tick (no trade)
+    /// These have open=0 and close=0, but may have valid high (ask) and low (bid)
+    pub fn is_bid_ask_only(&self) -> bool {
+        self.is_single_trade() && self.close == 0.0
     }
 }
 

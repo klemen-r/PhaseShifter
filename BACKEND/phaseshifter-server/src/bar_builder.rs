@@ -194,11 +194,15 @@ impl BarState {
             if current.timestamp_ms < bar_open_time {
                 // Close current bar
                 info!(
-                    "[BAR_BUILDER] Closing {} bar for {}: old_time={} -> new_time={}",
+                    "[BAR_BUILDER] Closing {} bar for {}: time={} O={:.2} H={:.2} L={:.2} C={:.2} ticks={}",
                     timeframe.as_str(),
                     symbol,
                     current.timestamp_ms,
-                    bar_open_time
+                    current.open,
+                    current.high,
+                    current.low,
+                    current.close,
+                    current.tick_count
                 );
                 let mut closed_bar = current.clone();
                 closed_bar.close();
@@ -314,9 +318,16 @@ impl BarBuilder {
     /// Process a tick
     pub async fn on_tick(&mut self, tick: &Tick) {
         self.tick_count += 1;
-        // Use server's system time instead of tick timestamp for bar boundaries
-        // This ensures bars close reliably even if tick timestamps are delayed/wrong
-        let timestamp_ms = Utc::now().timestamp_millis();
+        // Use tick's timestamp for historical data (live_mode = false)
+        // Use server's system time for live data (live_mode = true)
+        // This ensures historical bars are built at correct times, while live bars
+        // close reliably even if tick timestamps are delayed/wrong
+        let timestamp_ms = if self.live_mode {
+            Utc::now().timestamp_millis()
+        } else {
+            // tick.timestamp is in seconds, convert to milliseconds
+            (tick.timestamp * 1000.0) as i64
+        };
 
         // Ensure symbol states exist
         let tf_states = self.states.entry(tick.symbol.clone()).or_insert_with(|| {

@@ -767,6 +767,9 @@ async fn load_historical_data_scid(
                 let mut tick_count = 0u32;
                 let mut bar_count = 0u32;
                 let mut skipped = 0u32;
+                let mut skipped_bid_ask_only = 0u32;
+                let mut skipped_invalid_tick = 0u32;
+                let mut skipped_invalid_bar = 0u32;
 
                 for record in &records {
                     let unix_ts = record.to_unix_timestamp();
@@ -836,13 +839,38 @@ async fn load_historical_data_scid(
                         bar_count += 1;
                     } else {
                         skipped += 1;
+                        // Track why it was skipped
+                        if record.is_bid_ask_only() {
+                            // Bid/ask quote without trade - expected, no need to log
+                            skipped_bid_ask_only += 1;
+                        } else if record.is_single_trade() {
+                            // It's a tick but failed validation - bad price?
+                            skipped_invalid_tick += 1;
+                            if skipped_invalid_tick <= 3 {
+                                debug!(
+                                    "Invalid tick: O={} H={} L={} C={} vol={} ts={}",
+                                    record.open, record.high, record.low, record.close,
+                                    record.total_volume, unix_ts
+                                );
+                            }
+                        } else {
+                            // It's a bar but failed validation
+                            skipped_invalid_bar += 1;
+                            if skipped_invalid_bar <= 3 {
+                                debug!(
+                                    "Invalid bar: O={} H={} L={} C={} vol={} ts={}",
+                                    record.open, record.high, record.low, record.close,
+                                    record.total_volume, unix_ts
+                                );
+                            }
+                        }
                     }
                 }
                 drop(builder);
 
                 info!(
-                    "Loaded historical data for {}: {} ticks, {} bars ({} skipped)",
-                    base_symbol, tick_count, bar_count, skipped
+                    "Loaded historical data for {}: {} ticks, {} bars ({} skipped: {} bid/ask only, {} invalid ticks, {} invalid bars)",
+                    base_symbol, tick_count, bar_count, skipped, skipped_bid_ask_only, skipped_invalid_tick, skipped_invalid_bar
                 );
             }
             Err(e) => {
