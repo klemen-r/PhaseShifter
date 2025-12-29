@@ -511,34 +511,48 @@ export function TradingDataProvider({
 
             const lastTime =
               candles.length > 0 ? candles[candles.length - 1].time : null;
-            const action = lastTime === candle.time ? "UPDATE" : lastTime && lastTime < candle.time ? "PUSH" : candles.length === 0 ? "FIRST" : "SKIP_OLD";
-            console.log(
-              `[BAR_UPDATE] ${symbol} - rawTime=${candle.time}, lastRawTime=${lastTime}, ` +
-              `newDate=${new Date(candle.time).toISOString()}, lastDate=${lastTime ? new Date(lastTime).toISOString() : "none"}, ` +
-              `candleCount=${candles.length}, action=${action}`,
-            );
 
-            // Update or add the current bar
-            if (
-              candles.length > 0 &&
-              candles[candles.length - 1].time === candle.time
-            ) {
-              candles[candles.length - 1] = candle;
-            } else if (
-              candles.length > 0 &&
-              candles[candles.length - 1].time < candle.time
-            ) {
+            // Find existing candle with same timestamp
+            const existingIdx = candles.findIndex((c) => c.time === candle.time);
+
+            let action: string;
+            if (existingIdx >= 0) {
+              // Update existing candle at found index
+              action = `UPDATE@${existingIdx}`;
+              candles[existingIdx] = candle;
+            } else if (candles.length === 0) {
+              // First candle
+              action = "FIRST";
+              candles.push(candle);
+            } else if (lastTime !== null && lastTime < candle.time) {
+              // New bar, append
+              action = "PUSH";
               candles.push(candle);
               if (candles.length > maxCandlesRef.current) {
                 candles.shift();
               }
-            } else if (candles.length === 0) {
-              candles.push(candle);
             } else {
-              console.warn(
-                `[BAR_UPDATE] ${symbol} - SKIPPED: lastTime=${lastTime}, candleTime=${candle.time}`,
-              );
+              // Bar is older than last - insert at correct position
+              let insertIdx = candles.length;
+              for (let i = candles.length - 1; i >= 0; i--) {
+                if (candles[i].time < candle.time) {
+                  insertIdx = i + 1;
+                  break;
+                } else if (i === 0) {
+                  insertIdx = 0;
+                }
+              }
+              action = `INSERT@${insertIdx}`;
+              candles.splice(insertIdx, 0, candle);
+              if (candles.length > maxCandlesRef.current) {
+                candles.shift();
+              }
             }
+
+            console.log(
+              `[BAR_UPDATE] ${symbol} - time=${candle.time}, lastTime=${lastTime}, ` +
+              `candleCount=${candles.length}, action=${action}`,
+            );
 
             next.set(symbol, {
               ...existing,
@@ -581,7 +595,7 @@ export function TradingDataProvider({
               `Total candles: ${candles.length}`,
             );
 
-            // Find and update or append the closed bar
+            // Find existing candle with same timestamp
             const existingIdx = candles.findIndex(
               (c) => c.time === candle.time,
             );
@@ -591,17 +605,21 @@ export function TradingDataProvider({
               );
               candles[existingIdx] = candle;
             } else {
-              // Check if bar time is in the past (should append) or future
-              if (lastCandleTime !== null && candle.time < lastCandleTime) {
-                console.warn(
-                  `[BAR_CLOSED] ${symbol} - SKIPPING: bar time ${candle.time} is OLDER than last candle ${lastCandleTime}`,
-                );
-              } else {
-                console.log(`[BAR_CLOSED] ${symbol} - Appending new bar (index will be ${candles.length})`);
-                candles.push(candle);
-                if (candles.length > maxCandlesRef.current) {
-                  candles.shift();
+              // Insert at correct position (sorted by time) - don't skip!
+              // This handles race conditions where bar_update for next bar arrives before bar_closed
+              let insertIdx = candles.length;
+              for (let i = candles.length - 1; i >= 0; i--) {
+                if (candles[i].time < candle.time) {
+                  insertIdx = i + 1;
+                  break;
+                } else if (i === 0) {
+                  insertIdx = 0;
                 }
+              }
+              console.log(`[BAR_CLOSED] ${symbol} - Inserting at index ${insertIdx} (candle count: ${candles.length})`);
+              candles.splice(insertIdx, 0, candle);
+              if (candles.length > maxCandlesRef.current) {
+                candles.shift();
               }
             }
 
