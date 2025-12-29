@@ -633,8 +633,14 @@ export function PriceChart({
         vertLines: { color: "#111827" },
         horzLines: { color: "#111827" },
       },
-      timeScale: { borderVisible: false },
-      rightPriceScale: { borderVisible: false },
+      timeScale: {
+        borderVisible: false,
+        rightOffset: 100, // Empty space on right for new candles
+      },
+      rightPriceScale: {
+        borderVisible: false,
+        autoScale: true, // Auto-fit price range
+      },
     });
 
     chartRef.current = chart;
