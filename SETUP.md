@@ -59,7 +59,26 @@ cd frontend/phaseshifter
 npm install
 ```
 
-### 5. Start the Application
+### 5. Setup Database (Prisma + SQLite)
+
+The frontend uses a local SQLite database for storing chart settings.
+
+```bash
+cd frontend/phaseshifter
+
+# Create .env file with database URL
+echo 'DATABASE_URL="file:./dev.db"' > .env
+
+# Generate Prisma client
+npx prisma generate
+
+# Create the database
+npx prisma db push
+```
+
+This creates `prisma/dev.db` - a local SQLite file (gitignored).
+
+### 6. Start the Application
 
 **Terminal 1 - Rust Server:**
 ```bash
@@ -171,6 +190,16 @@ cd frontend/phaseshifter
 rm -rf node_modules .next
 npm install
 npm run dev
+```
+
+### HTTP 500 errors on all routes
+
+Database not initialized. Run:
+```bash
+cd frontend/phaseshifter
+echo 'DATABASE_URL="file:./dev.db"' > .env
+npx prisma generate
+npx prisma db push
 ```
 
 ## Ports Used
