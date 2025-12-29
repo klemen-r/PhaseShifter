@@ -977,13 +977,11 @@ async fn process_bar_events(
                 let _ = broadcast_tx.send(msg);
             }
             BarEvent::Closed(bar) => {
-                // Log 1m bar closes (time only)
-                if bar.timeframe == "1m" {
-                    info!(
-                        "[BAR_CLOSED] {} {} time={}",
-                        bar.symbol, bar.timeframe, bar.timestamp_ms
-                    );
-                }
+                // Log ALL bar closes to debug
+                info!(
+                    "[BAR_CLOSED] {} tf={} time={}",
+                    bar.symbol, bar.timeframe, bar.timestamp_ms
+                );
                 // Broadcast bar closed
                 let msg = WsOutMessage::BarClosed {
                     symbol: bar.symbol.clone(),

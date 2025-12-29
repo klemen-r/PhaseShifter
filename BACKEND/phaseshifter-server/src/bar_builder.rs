@@ -192,13 +192,12 @@ impl BarState {
         if let Some(ref current) = self.current_bar {
             if current.timestamp_ms < bar_open_time {
                 // Close current bar
-                debug!(
-                    "Closing {} bar for {}: current_ts={} < new_bar_ts={} (tick_ts={})",
+                info!(
+                    "[BAR_BUILDER] Closing {} bar for {}: old_time={} -> new_time={}",
                     timeframe.as_str(),
                     symbol,
                     current.timestamp_ms,
-                    bar_open_time,
-                    timestamp_ms
+                    bar_open_time
                 );
                 let mut closed_bar = current.clone();
                 closed_bar.close();
