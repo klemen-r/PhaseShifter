@@ -29,6 +29,7 @@ DEFAULT_RUNS = [
     {"interval": "5m", "days": 50, "phase_window": 7, "depth_days": 50},
     {"interval": "5m", "days": 50, "phase_window": 20, "depth_days": 50},
     {"interval": "15m", "days": 60, "phase_window": 10, "depth_days": 60},
+    {"interval": "1h", "days": 100, "phase_window": 7, "depth_days": 100},
 ]
 MIN_UNIQUE_SCENARIOS = 1
 
@@ -119,7 +120,9 @@ class PipelineRunner:
                             "data": result,
                         },
                     )
-                    print(f"[Pipeline] Broadcast clusters to {len(auto_subscribers)} auto-cluster clients for {ticker}")
+                    print(
+                        f"[Pipeline] Broadcast clusters to {len(auto_subscribers)} auto-cluster clients for {ticker}"
+                    )
 
             return result
 

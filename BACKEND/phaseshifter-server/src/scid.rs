@@ -113,10 +113,22 @@ impl ScidRecord {
         (self.to_unix_timestamp() * 1000.0) as i64
     }
 
-    /// Check if this is a single trade/tick record (Open == 0.0)
+    /// Check if this is a single trade/tick record
     /// In tick mode: Open=0, High=AskPrice, Low=BidPrice, Close=LastTradePrice
+    /// Sierra Chart also uses special negative open values (like -1.999e37) as markers
+    /// for tick records - these should also be treated as ticks, not bars.
     pub fn is_single_trade(&self) -> bool {
-        self.open == 0.0
+        // Standard tick record: open == 0
+        if self.open == 0.0 {
+            return true;
+        }
+        // Sierra Chart special marker records: large negative open values
+        // These have pattern like -1.999001e37 or -1.999002e37
+        // They contain valid tick data in high/low/close fields
+        if self.open < -1e30 {
+            return true;
+        }
+        false
     }
 
     /// Get the trade price from a tick record

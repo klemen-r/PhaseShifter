@@ -156,19 +156,26 @@ interface TradingDataProviderProps {
 
 export function TradingDataProvider({
   children,
-  maxCandles = 500,
+  maxCandles = 800,
   pythonServerUrl = "ws://localhost:8001",
 }: TradingDataProviderProps) {
   const { status, lastPingMs, send, subscribe, connect } = useWebSocket();
 
   // Python server connection state
   const [pythonSocket, setPythonSocket] = useState<WebSocket | null>(null);
-  const [pythonStatus, setPythonStatus] = useState<"open" | "closed" | "connecting" | "error">("closed");
-  const pythonReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [pythonStatus, setPythonStatus] = useState<
+    "open" | "closed" | "connecting" | "error"
+  >("closed");
+  const pythonReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   // Connect to Python server
   const connectPython = useCallback(() => {
-    if (pythonSocket?.readyState === WebSocket.OPEN || pythonSocket?.readyState === WebSocket.CONNECTING) {
+    if (
+      pythonSocket?.readyState === WebSocket.OPEN ||
+      pythonSocket?.readyState === WebSocket.CONNECTING
+    ) {
       return;
     }
 
@@ -198,114 +205,125 @@ export function TradingDataProvider({
   }, [pythonServerUrl]);
 
   // Send to Python server
-  const sendToPython = useCallback((data: string | object) => {
-    if (pythonSocket?.readyState === WebSocket.OPEN) {
-      const payload = typeof data === "string" ? data : JSON.stringify(data);
-      pythonSocket.send(payload);
-    }
-  }, [pythonSocket]);
+  const sendToPython = useCallback(
+    (data: string | object) => {
+      if (pythonSocket?.readyState === WebSocket.OPEN) {
+        const payload = typeof data === "string" ? data : JSON.stringify(data);
+        pythonSocket.send(payload);
+      }
+    },
+    [pythonSocket],
+  );
 
   // Ref for maxCandles to use in callbacks
   const maxCandlesRef = useRef(maxCandles);
 
   // Helper to create default ticker data (defined early for use in callbacks)
-  const createDefaultTickerData = useCallback((): TickerData => ({
-    candles: [],
-    clusters: null,
-    lastUpdated: null,
-    lastTick: null,
-    phase: null,
-    anchor: null,
-    dm: null,
-    openNodes: [],
-  }), []);
+  const createDefaultTickerData = useCallback(
+    (): TickerData => ({
+      candles: [],
+      clusters: null,
+      lastUpdated: null,
+      lastTick: null,
+      phase: null,
+      anchor: null,
+      dm: null,
+      openNodes: [],
+    }),
+    [],
+  );
 
   // Handle Python server messages (defined early for use in connectPython)
-  const handlePythonMessage = useCallback((rawData: string) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawData);
-    } catch {
-      return;
-    }
-    if (!parsed || typeof parsed !== "object") return;
+  const handlePythonMessage = useCallback(
+    (rawData: string) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawData);
+      } catch {
+        return;
+      }
+      if (!parsed || typeof parsed !== "object") return;
 
-    const msg = parsed as Record<string, unknown>;
+      const msg = parsed as Record<string, unknown>;
 
-    // Python server message types
-    if (msg.type === "candle") {
-      const ticker = msg.ticker as string;
-      const data = msg.data as {
-        time: number;
-        open: number;
-        high: number;
-        low: number;
-        close: number;
-        volume: number;
-      };
-      const candle: WSCandle = {
-        time: data.time,
-        open: data.open,
-        high: data.high,
-        low: data.low,
-        close: data.close,
-        volume: data.volume,
-      };
+      // Python server message types
+      if (msg.type === "candle") {
+        const ticker = msg.ticker as string;
+        const data = msg.data as {
+          time: number;
+          open: number;
+          high: number;
+          low: number;
+          close: number;
+          volume: number;
+        };
+        const candle: WSCandle = {
+          time: data.time,
+          open: data.open,
+          high: data.high,
+          low: data.low,
+          close: data.close,
+          volume: data.volume,
+        };
 
-      setLastCandle({ ticker, candle });
+        setLastCandle({ ticker, candle });
 
-      setTickerData((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(ticker) ?? createDefaultTickerData();
-        const newCandles = [...existing.candles, candle];
-        if (newCandles.length > maxCandlesRef.current) {
-          newCandles.shift();
-        }
-        next.set(ticker, {
-          ...existing,
-          candles: newCandles,
-          lastUpdated: Date.now(),
+        setTickerData((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(ticker) ?? createDefaultTickerData();
+          const newCandles = [...existing.candles, candle];
+          if (newCandles.length > maxCandlesRef.current) {
+            newCandles.shift();
+          }
+          next.set(ticker, {
+            ...existing,
+            candles: newCandles,
+            lastUpdated: Date.now(),
+          });
+          return next;
         });
-        return next;
-      });
-    } else if (msg.type === "clusters") {
-      const ticker = msg.ticker as string;
-      const data = msg.data as ClustersData;
+      } else if (msg.type === "clusters") {
+        const ticker = msg.ticker as string;
+        const data = msg.data as ClustersData;
 
-      setLastClusters({ ticker, data });
+        setLastClusters({ ticker, data });
 
-      setTickerData((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(ticker) ?? createDefaultTickerData();
-        next.set(ticker, {
-          ...existing,
-          clusters: data,
-          lastUpdated: Date.now(),
+        setTickerData((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(ticker) ?? createDefaultTickerData();
+          next.set(ticker, {
+            ...existing,
+            clusters: data,
+            lastUpdated: Date.now(),
+          });
+          return next;
         });
-        return next;
-      });
-    } else if (msg.type === "subscribed") {
-      const ticker = msg.ticker as string;
-      setConfirmedTickers((prev) => new Set(prev).add(ticker));
-    } else if (msg.type === "unsubscribed") {
-      const ticker = msg.ticker as string;
-      setConfirmedTickers((prev) => {
-        const next = new Set(prev);
-        next.delete(ticker);
-        return next;
-      });
-    } else if (msg.type === "error") {
-      setLastError(msg.message as string);
-    } else if (msg.type === "auto_clusters_enabled") {
-      setAutoClustersEnabled((prev) => new Set(prev).add(msg.ticker as string));
-    } else if (msg.type === "auto_clusters_disabled") {
-      setAutoClustersEnabled((prev) => {
-        const next = new Set(prev);
-        next.delete(msg.ticker as string);
-        return next;
-      });
-    }
-  }, [createDefaultTickerData]);
+      } else if (msg.type === "subscribed") {
+        const ticker = msg.ticker as string;
+        setConfirmedTickers((prev) => new Set(prev).add(ticker));
+      } else if (msg.type === "unsubscribed") {
+        const ticker = msg.ticker as string;
+        setConfirmedTickers((prev) => {
+          const next = new Set(prev);
+          next.delete(ticker);
+          return next;
+        });
+      } else if (msg.type === "error") {
+        setLastError(msg.message as string);
+      } else if (msg.type === "auto_clusters_enabled") {
+        setAutoClustersEnabled((prev) =>
+          new Set(prev).add(msg.ticker as string),
+        );
+      } else if (msg.type === "auto_clusters_disabled") {
+        setAutoClustersEnabled((prev) => {
+          const next = new Set(prev);
+          next.delete(msg.ticker as string);
+          return next;
+        });
+      }
+    },
+    [createDefaultTickerData],
+  );
 
   // Track which tickers we want to be subscribed to (persisted)
   const [desiredTickers, setDesiredTickers] = useState<Set<string>>(
@@ -316,6 +334,12 @@ export function TradingDataProvider({
   const [tickerData, setTickerData] = useState<Map<string, TickerData>>(
     () => new Map(),
   );
+  // Ref to access tickerData in callbacks without re-creating them
+  const tickerDataRef = useRef<Map<string, TickerData>>(new Map());
+  useEffect(() => {
+    tickerDataRef.current = tickerData;
+  }, [tickerData]);
+
   const [lastCandle, setLastCandle] = useState<{
     ticker: string;
     candle: WSCandle;
@@ -415,7 +439,7 @@ export function TradingDataProvider({
           parsed.symbols.forEach((symbol) => {
             setDesiredTickers((prev) => new Set(prev).add(symbol));
             // Request historical bars for 1m timeframe (server expects lowercase)
-            send({ type: "get_history", symbol, timeframe: "1m", limit: 500 });
+            send({ type: "get_history", symbol, timeframe: "1m", limit: 800 });
           });
         } else if (isTickMessage(parsed)) {
           // Rust server tick format: { type: "tick", symbol, price, volume, timestamp, bid, ask }
@@ -445,8 +469,12 @@ export function TradingDataProvider({
               candles[candles.length - 1] = lastCandle;
             } else {
               // No candles yet, create a synthetic one from the tick
+              // Align timestamp to 1-minute bar boundary (same as Rust bar_builder)
+              const MINUTE_MS = 60_000;
+              const alignedTime =
+                Math.floor(tick.timestamp / MINUTE_MS) * MINUTE_MS;
               candles.push({
-                time: tick.timestamp,
+                time: alignedTime,
                 open: tick.price,
                 high: tick.price,
                 low: tick.price,
@@ -497,7 +525,9 @@ export function TradingDataProvider({
               candles.length > 0 ? candles[candles.length - 1].time : null;
 
             // Find existing candle with same timestamp
-            const existingIdx = candles.findIndex((c) => c.time === candle.time);
+            const existingIdx = candles.findIndex(
+              (c) => c.time === candle.time,
+            );
 
             if (existingIdx >= 0) {
               // Update existing candle at found index
@@ -727,6 +757,16 @@ export function TradingDataProvider({
         // Sierra symbols (NQ, ES) -> Rust server
         if (status === "open") {
           send({ type: "subscribe", ticker });
+          // Request history if we don't have candles for this ticker yet
+          const existing = tickerDataRef.current.get(ticker);
+          if (!existing || existing.candles.length === 0) {
+            send({
+              type: "get_history",
+              symbol: ticker,
+              timeframe: "1m",
+              limit: 800,
+            });
+          }
         }
       } else {
         // Other symbols -> Python server

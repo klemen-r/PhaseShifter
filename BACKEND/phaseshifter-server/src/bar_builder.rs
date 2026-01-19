@@ -113,6 +113,10 @@ impl Bar {
 
     /// Update bar with a new tick
     fn update(&mut self, price: f64, volume: f64) {
+        // Validate price - reject obviously bad values
+        if !price.is_finite() || price <= 0.0 {
+            return;
+        }
         self.high = self.high.max(price);
         self.low = self.low.min(price);
         self.close = price;
@@ -186,6 +190,17 @@ impl BarState {
         volume: f64,
         timestamp_ms: i64,
     ) -> Vec<BarEvent> {
+        // Validate price early - reject bad values
+        if !price.is_finite() || price <= 0.0 {
+            warn!(
+                "Rejecting invalid tick price for {} {}: price={}",
+                symbol,
+                timeframe.as_str(),
+                price
+            );
+            return Vec::new();
+        }
+
         let mut events = Vec::new();
         let bar_open_time = get_bar_open_time(timestamp_ms, timeframe);
 
@@ -277,7 +292,7 @@ impl BarBuilder {
         Self {
             timeframes,
             states: HashMap::new(),
-            max_history: 500,
+            max_history: 800,
             event_sender,
             verify_sender: None,
             symbol_to_sierra: HashMap::new(),

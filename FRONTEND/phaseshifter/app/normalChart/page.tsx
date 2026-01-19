@@ -26,7 +26,12 @@ import {
   type ClustersData,
 } from "@/lib/websocket";
 import { ClustersDisplay } from "@/components/websocket";
-import type { UTCTimestamp, Time, ISeriesApi } from "lightweight-charts";
+import type {
+  UTCTimestamp,
+  Time,
+  ISeriesApi,
+  TickMarkFormatter,
+} from "lightweight-charts";
 
 import {
   createChart,
@@ -35,7 +40,65 @@ import {
   LineSeries,
   CandlestickSeries,
   LineType,
+  TickMarkType,
 } from "lightweight-charts";
+
+// Format timestamp to US Eastern time (CME exchange time)
+// TradingView uses UTC internally, so we use a custom formatter to display Eastern time
+function formatToEasternTime(
+  timestamp: number,
+  tickMarkType: TickMarkType,
+): string {
+  // timestamp is in seconds (UTC)
+  const date = new Date(timestamp * 1000);
+
+  // Format in America/New_York timezone
+  const options: Intl.DateTimeFormatOptions = { timeZone: "America/New_York" };
+
+  switch (tickMarkType) {
+    case TickMarkType.Year:
+      return date.toLocaleString("en-US", { ...options, year: "numeric" });
+    case TickMarkType.Month:
+      return date.toLocaleString("en-US", { ...options, month: "short" });
+    case TickMarkType.DayOfMonth:
+      return date.toLocaleString("en-US", { ...options, day: "numeric" });
+    case TickMarkType.Time:
+      return date.toLocaleString("en-US", {
+        ...options,
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+    case TickMarkType.TimeWithSeconds:
+      return date.toLocaleString("en-US", {
+        ...options,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+    default:
+      return date.toLocaleString("en-US", {
+        ...options,
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+  }
+}
+
+// Custom tick mark formatter for Eastern time
+const easternTimeFormatter: TickMarkFormatter = (
+  time,
+  tickMarkType,
+  _locale,
+) => {
+  const timestamp =
+    typeof time === "number" ? time : new Date(time as string).getTime() / 1000;
+  return formatToEasternTime(timestamp, tickMarkType);
+};
 import {
   ClusterRectanglesPrimitive,
   type ClusterRect,
@@ -108,6 +171,21 @@ export default function NormalChartPage() {
   >("none");
   const [clusterAlerts, setClusterAlerts] = useState(false); // off by default
 
+  // Pushcat webhook URL with localStorage persistence
+  const [pushcatWebhookUrl, setPushcatWebhookUrl] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("phaseshifter_pushcat_webhook") || "";
+    }
+    return "";
+  });
+
+  // Save webhook URL to localStorage when it changes
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("phaseshifter_pushcat_webhook", pushcatWebhookUrl);
+    }
+  }, [pushcatWebhookUrl]);
+
   // Preset management
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>([]);
 
@@ -135,6 +213,9 @@ export default function NormalChartPage() {
     setClusterBorderStyle(preset.clusterBorderStyle);
     if (preset.clusterAlerts !== undefined) {
       setClusterAlerts(preset.clusterAlerts);
+    }
+    if (preset.pushcatWebhookUrl !== undefined) {
+      setPushcatWebhookUrl(preset.pushcatWebhookUrl);
     }
     setSettings({
       lineColor: preset.lineColor,
@@ -309,9 +390,20 @@ export default function NormalChartPage() {
           description: `Price ${currentPrice.toFixed(2)} in cluster ${enteredCluster.low.toFixed(2)} - ${enteredCluster.high.toFixed(2)}`,
           duration: 5000,
         });
+
+        // Send Pushcat notification if webhook URL is configured
+        if (pushcatWebhookUrl) {
+          const title = `${wsTicker} ${side} Zone`;
+          const body = `Price ${currentPrice.toFixed(2)} entered cluster ${enteredCluster.low.toFixed(2)} - ${enteredCluster.high.toFixed(2)}`;
+          fetch(pushcatWebhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, body }),
+          }).catch(() => {}); // Ignore errors silently
+        }
       }
     }
-  }, [clusterAlerts, currentPrice, clusters, wsTicker]);
+  }, [clusterAlerts, currentPrice, clusters, wsTicker, pushcatWebhookUrl]);
 
   return (
     <div className="relative flex w-full min-h-screen bg-zinc-50 font-sans dark:bg-black">
@@ -520,6 +612,9 @@ export default function NormalChartPage() {
         setClusterBorderStyle={setClusterBorderStyle}
         clusterAlerts={clusterAlerts}
         setClusterAlerts={setClusterAlerts}
+        // Notifications
+        pushcatWebhookUrl={pushcatWebhookUrl}
+        setPushcatWebhookUrl={setPushcatWebhookUrl}
         // Midpoint colors
         lineColor={lineColor}
         setLineColor={(val) =>
@@ -643,10 +738,28 @@ export function PriceChart({
       timeScale: {
         borderVisible: false,
         rightOffset: 100, // Empty space on right for new candles
+        timeVisible: true, // Show time (hours:minutes) on the scale
+        tickMarkFormatter: easternTimeFormatter, // Display in US Eastern time
       },
       rightPriceScale: {
         borderVisible: false,
         autoScale: true, // Auto-fit price range
+      },
+      localization: {
+        // Format crosshair tooltip time in Eastern time
+        timeFormatter: (time: number) => {
+          const date = new Date(time * 1000);
+          return (
+            date.toLocaleString("en-US", {
+              timeZone: "America/New_York",
+              month: "short",
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            }) + " ET"
+          );
+        },
       },
     });
 

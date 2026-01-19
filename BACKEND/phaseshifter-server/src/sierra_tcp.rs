@@ -250,11 +250,11 @@ async fn handle_connection(
                                 timestamp_ms: sierra_tick.timestamp_us / 1000,
                             };
 
-                            // Log first few ticks for debugging
-                            if tick_count <= 5 {
-                                debug!(
-                                    "Sierra tick #{}: {} @ {:.2}",
-                                    tick_count, symbol, sierra_tick.price
+                            // Log first few ticks for debugging (with symbol_id for verification)
+                            if tick_count <= 10 {
+                                info!(
+                                    "Sierra tick #{}: symbol_id={} -> {} @ {:.2}",
+                                    tick_count, sierra_tick.symbol_id, symbol, sierra_tick.price
                                 );
                             }
 

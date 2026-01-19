@@ -24,6 +24,7 @@ export type ChartSettingsData = {
   clusterBorderColor: string;
   clusterBorderStyle: "solid" | "dashed" | "none";
   clusterAlerts: boolean;
+  pushcatWebhookUrl: string;
   lineColor: string;
   bgUpColor: string;
   bgDownColor: string;
@@ -64,6 +65,10 @@ type ExtraSettingsDialogProps = {
   setClusterBorderStyle: (val: "solid" | "dashed" | "none") => void;
   clusterAlerts: boolean;
   setClusterAlerts: (val: boolean) => void;
+
+  // Notifications
+  pushcatWebhookUrl: string;
+  setPushcatWebhookUrl: (val: string) => void;
 
   // Midpoint colors
   lineColor: string;
@@ -148,6 +153,21 @@ const settingItems: SettingItem[] = [
     keywords: ["cluster", "alert", "notification", "sound", "entry"],
   },
   {
+    id: "pushcatWebhookUrl",
+    label: "Pushcat Webhook URL",
+    category: "Notifications",
+    keywords: [
+      "pushcat",
+      "webhook",
+      "notification",
+      "push",
+      "phone",
+      "mobile",
+      "alert",
+      "url",
+    ],
+  },
+  {
     id: "lineColor",
     label: "Midpoint Line Color",
     category: "Midpoint",
@@ -216,6 +236,8 @@ export function ExtraSettingsDialog({
   setClusterBorderStyle,
   clusterAlerts,
   setClusterAlerts,
+  pushcatWebhookUrl,
+  setPushcatWebhookUrl,
   lineColor,
   setLineColor,
   bgUpColor,
@@ -270,6 +292,7 @@ export function ExtraSettingsDialog({
       clusterBorderColor,
       clusterBorderStyle,
       clusterAlerts,
+      pushcatWebhookUrl,
       lineColor,
       bgUpColor,
       bgDownColor,
@@ -288,6 +311,7 @@ export function ExtraSettingsDialog({
       clusterBorderColor,
       clusterBorderStyle,
       clusterAlerts,
+      pushcatWebhookUrl,
       lineColor,
       bgUpColor,
       bgDownColor,
@@ -589,6 +613,34 @@ export function ExtraSettingsDialog({
                 </div>
               )}
               {isCategoryVisible("Clusters") && (
+                <Separator className="bg-zinc-800" />
+              )}
+            </>
+          )}
+
+          {/* Notifications */}
+          {isCategoryVisible("Notifications") && (
+            <>
+              <div className="text-xs font-medium text-zinc-500 uppercase tracking-wider">
+                Notifications
+              </div>
+              {isVisible("pushcatWebhookUrl") && (
+                <div className="space-y-2">
+                  <Label className="text-zinc-200">Pushcat Webhook URL</Label>
+                  <Input
+                    type="url"
+                    placeholder="https://api.pushcat.io/..."
+                    value={pushcatWebhookUrl}
+                    onChange={(e) => setPushcatWebhookUrl(e.target.value)}
+                    className="bg-zinc-900 border-zinc-800 font-mono text-xs"
+                  />
+                  <p className="text-xs text-zinc-500">
+                    Enter your Pushcat webhook URL to receive phone
+                    notifications when price enters cluster zones.
+                  </p>
+                </div>
+              )}
+              {isCategoryVisible("Notifications") && (
                 <Separator className="bg-zinc-800" />
               )}
             </>

@@ -234,14 +234,17 @@ SCSFExport scsf_PhaseShifterStream(SCStudyInterfaceRef sc) {
         return;
     }
 
-    // Initialize symbol ID on first run
-    if (SymbolID == 0) {
-        SCString fullSymbol;
-        fullSymbol.Format("%s", sc.Symbol.GetChars());
-        SymbolID = HashSymbol(fullSymbol.GetChars());
-
+    // Calculate symbol ID from chart symbol
+    // IMPORTANT: Recalculate every time to ensure correct symbol ID per chart instance
+    SCString fullSymbol;
+    fullSymbol.Format("%s", sc.Symbol.GetChars());
+    uint32_t currentSymbolID = HashSymbol(fullSymbol.GetChars());
+    
+    // Log on first run or if symbol changed
+    if (SymbolID != currentSymbolID) {
+        SymbolID = currentSymbolID;
         SCString msg;
-        msg.Format("PhaseShifter: Initialized for symbol %s (ID: %u)",
+        msg.Format("PhaseShifter: Symbol %s (ID: %u)",
                    fullSymbol.GetChars(), SymbolID);
         sc.AddMessageToLog(msg, 0);
     }

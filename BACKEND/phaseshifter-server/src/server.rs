@@ -248,6 +248,7 @@ impl Server {
             (Timeframe::M5, 7),   // 5-minute with 7-period window
             (Timeframe::M5, 20),  // 5-minute with 20-period window
             (Timeframe::M15, 10), // 15-minute with 10-period window
+            (Timeframe::H1, 7),   // 1-hour with 7-period window
         ];
 
         // Initialize engines for each symbol and scenario
@@ -553,8 +554,21 @@ async fn process_sierra_ticks(
 ) {
     let mut tick_count: u64 = 0;
     let mut last_log_count: u64 = 0;
+    let mut waiting_for_live_mode = true;
 
     while let Some(tick) = tick_rx.recv().await {
+        // Wait for live mode before processing ticks
+        // This prevents live ticks from interfering with historical data loading
+        if waiting_for_live_mode {
+            let builder = bar_builder.read().await;
+            if !builder.is_live_mode() {
+                // Skip this tick - historical loading still in progress
+                continue;
+            }
+            waiting_for_live_mode = false;
+            info!("Sierra TCP processing started - live mode active");
+        }
+
         tick_count += 1;
 
         // Map Sierra symbol to base symbol (e.g., NQH26-CME -> NQ)
@@ -562,6 +576,14 @@ async fn process_sierra_ticks(
             .get(&tick.symbol)
             .cloned()
             .unwrap_or_else(|| tick.symbol.clone());
+
+        // Debug: log first 10 ticks with symbol mapping
+        if tick_count <= 10 {
+            info!(
+                "process_sierra_ticks #{}: raw={} -> base={} @ {:.2}",
+                tick_count, tick.symbol, base_symbol, tick.price
+            );
+        }
 
         // Broadcast tick to WebSocket clients with base symbol
         let tick_msg = WsOutMessage::Tick {
@@ -880,6 +902,33 @@ async fn load_historical_data_scid(
                     "Loaded historical data for {}: {} ticks, {} bars ({} skipped: {} bid/ask only, {} invalid ticks, {} invalid bars)",
                     base_symbol, tick_count, bar_count, skipped, skipped_bid_ask_only, skipped_invalid_tick, skipped_invalid_bar
                 );
+
+                // Log bar count after loading and check for anomalies
+                {
+                    let builder = bar_builder.read().await;
+                    let m1_bars = builder.get_bars(&base_symbol, Timeframe::M1);
+                    let m5_bars = builder.get_bars(&base_symbol, Timeframe::M5);
+                    info!(
+                        "Built bars for {}: M1={}, M5={}",
+                        base_symbol,
+                        m1_bars.len(),
+                        m5_bars.len()
+                    );
+
+                    // Check for abnormally large bars (potential bug indicator)
+                    for (i, bar) in m1_bars.iter().enumerate() {
+                        let range = bar.high - bar.low;
+                        // ES typically has 1-5 point range per minute, NQ has 10-50
+                        // Flag anything over 100 points as suspicious
+                        if range > 100.0 || bar.tick_count > 10000 {
+                            warn!(
+                                "Large M1 bar detected for {} at index {}: time={} range={:.2} ticks={} O={:.2} H={:.2} L={:.2} C={:.2}",
+                                base_symbol, i, bar.timestamp_ms, range, bar.tick_count,
+                                bar.open, bar.high, bar.low, bar.close
+                            );
+                        }
+                    }
+                }
             }
             Err(e) => {
                 error!(
@@ -1217,14 +1266,15 @@ async fn process_bar_events(
                             }
                         }
 
-                        // Broadcast updated clusters when nodes close (target hit)
-                        if any_nodes_closed {
-                            if let Some(data) = cm.get_clusters(&bar.symbol) {
-                                let clusters_msg = WsOutMessage::Clusters {
-                                    ticker: bar.symbol.clone(),
-                                    data,
-                                };
-                                let _ = broadcast_tx.send(clusters_msg);
+                        // Broadcast updated clusters after every bar close
+                        // This ensures frontend always has fresh cluster positions as anchors move
+                        if let Some(data) = cm.get_clusters(&bar.symbol) {
+                            let clusters_msg = WsOutMessage::Clusters {
+                                ticker: bar.symbol.clone(),
+                                data,
+                            };
+                            let _ = broadcast_tx.send(clusters_msg);
+                            if any_nodes_closed {
                                 info!("Broadcast clusters for {} after node(s) closed", bar.symbol);
                             }
                         }
@@ -1427,6 +1477,18 @@ async fn handle_client_message(
                     volume: b.volume,
                 })
                 .collect();
+
+            // Log first and last bar for debugging
+            if !history_bars.is_empty() {
+                let first = &history_bars[0];
+                let last = &history_bars[history_bars.len() - 1];
+                debug!(
+                    "Sending {} history bars for {} {}: first=[time={}, O={:.2} H={:.2} L={:.2} C={:.2}] last=[time={}, O={:.2} H={:.2} L={:.2} C={:.2}]",
+                    history_bars.len(), symbol_upper, timeframe,
+                    first.timestamp_ms, first.open, first.high, first.low, first.close,
+                    last.timestamp_ms, last.open, last.high, last.low, last.close
+                );
+            }
 
             let msg = WsOutMessage::History {
                 symbol: symbol_upper,
