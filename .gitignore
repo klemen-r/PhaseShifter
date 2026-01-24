@@ -70,7 +70,19 @@ nul
 .idea/
 .zed/
 
+########################
+# Research (PhaseShifter)
+########################
+/RESEARCH/target/
+/RESEARCH/data/
+/RESEARCH/charts/
+RESEARCH/*.csv
+RESEARCH/*.log
+RESEARCH/ml/*.csv
 
+########################
+# Local tool state / logs
+########################
 .claude/
 server_log.txt
 *.log
