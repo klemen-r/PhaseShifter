@@ -69,3 +69,8 @@ nul
 .vscode/
 .idea/
 .zed/
+
+
+.claude/
+server_log.txt
+*.log
