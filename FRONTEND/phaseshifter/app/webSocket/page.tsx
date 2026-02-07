@@ -60,7 +60,6 @@ export default function WebSocketDebug() {
     getCandles,
     getClusters,
     pythonStatus,
-    getStatusForTicker,
   } = useTradingData();
 
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);

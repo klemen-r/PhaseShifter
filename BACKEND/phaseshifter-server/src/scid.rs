@@ -1,7 +1,6 @@
 //! SCID File Reader
 //!
 //! Reads Sierra Chart's Intraday Data (.scid) files directly from disk.
-//! This bypasses DTC protocol restrictions for CME data.
 //!
 //! File Format:
 //! - 56-byte header (s_IntradayHeader)

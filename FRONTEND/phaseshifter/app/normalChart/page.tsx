@@ -25,7 +25,7 @@ import {
   type WSCandle,
   type ClustersData,
 } from "@/lib/websocket";
-import { ClustersDisplay } from "@/components/websocket";
+import { AccountPanel } from "@/components/AccountPanel";
 import type {
   UTCTimestamp,
   Time,
@@ -93,7 +93,6 @@ function formatToEasternTime(
 const easternTimeFormatter: TickMarkFormatter = (
   time,
   tickMarkType,
-  _locale,
 ) => {
   const timestamp =
     typeof time === "number" ? time : new Date(time as string).getTime() / 1000;
@@ -229,25 +228,20 @@ export default function NormalChartPage() {
     });
   }, []);
 
-  // Load presets on mount
-  useEffect(() => {
-    fetchPresets();
-  }, [fetchPresets]);
-
   const {
-    status: wsStatus,
-    pythonStatus,
     getStatusForTicker,
     subscribedTickers,
     subscribeTicker,
     unsubscribeTicker,
     getClusters,
+    getCurrentPrice,
     requestClusters,
     enableAutoClusters,
     disableAutoClusters,
     isAutoClustersEnabled,
-    connectedSymbols,
     tickerData,
+    lastClusters,
+    lastError,
   } = useTradingData();
 
   // Get the appropriate connection status for current ticker
@@ -269,22 +263,16 @@ export default function NormalChartPage() {
     if (openMobile) setOpenMobile(false);
   }, [open, openMobile, setOpen, setOpenMobile]);
 
-  // Auto-select first connected symbol when server FIRST connects (not on every ticker change)
-  const hasAutoSelectedRef = useRef(false);
-  useEffect(() => {
-    if (connectedSymbols.length > 0 && !hasAutoSelectedRef.current) {
-      // Only auto-select if current ticker is empty or the default "NQ" on first load
-      if (!wsTicker || wsTicker === "NQ") {
-        setWsTicker(connectedSymbols[0]);
-      }
-      hasAutoSelectedRef.current = true;
-    }
-  }, [connectedSymbols, wsTicker]);
-
   // Get candles for current ticker - extract from tickerData for reactivity
+  const isCurrentTickerSubscribed = subscribedTickers.has(wsTicker);
   const tickerInfo = tickerData.get(wsTicker);
-  const wsCandles = tickerInfo?.candles ?? [];
-  const lastTickPrice = tickerInfo?.lastTick?.price ?? null;
+  const wsCandles = useMemo(
+    () => (isCurrentTickerSubscribed ? (tickerInfo?.candles ?? []) : []),
+    [isCurrentTickerSubscribed, tickerInfo?.candles],
+  );
+  const lastTickPrice = isCurrentTickerSubscribed
+    ? (tickerInfo?.lastTick?.price ?? null)
+    : null;
 
   // Compute chart data from WebSocket candles
   const chartData = useMemo(() => {
@@ -298,9 +286,52 @@ export default function NormalChartPage() {
 
   // Get clusters once for both chart and alerts
   const clusters = useMemo(
-    () => getClusters(wsTicker),
-    [getClusters, wsTicker],
+    () => (isCurrentTickerSubscribed ? getClusters(wsTicker) : null),
+    [getClusters, wsTicker, isCurrentTickerSubscribed],
   );
+
+  const [clusterFetchStatus, setClusterFetchStatus] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+  const [clusterFetchAt, setClusterFetchAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    setClusterFetchStatus("idle");
+    setClusterFetchAt(null);
+  }, [wsTicker]);
+
+  useEffect(() => {
+    if (lastClusters?.ticker === wsTicker) {
+      setClusterFetchStatus("success");
+      setClusterFetchAt(Date.now());
+    }
+  }, [lastClusters, wsTicker]);
+
+  useEffect(() => {
+    if (clusterFetchStatus === "loading" && lastError) {
+      setClusterFetchStatus("error");
+    }
+  }, [clusterFetchStatus, lastError]);
+
+  const clusterStatus = useMemo(() => {
+    if (clusterFetchStatus === "loading") {
+      return { text: "Fetching clusters...", className: "text-amber-400" };
+    }
+    if (clusterFetchStatus === "error") {
+      return { text: "Failed to fetch clusters", className: "text-red-400" };
+    }
+    if (clusters) {
+      const count = clusters.clusters.length;
+      const time = clusterFetchAt
+        ? new Date(clusterFetchAt).toLocaleTimeString()
+        : null;
+      return {
+        text: `Clusters loaded (${count})${time ? ` · ${time}` : ""}`,
+        className: "text-emerald-400",
+      };
+    }
+    return { text: "No clusters loaded", className: "text-zinc-500" };
+  }, [clusterFetchStatus, clusters, clusterFetchAt]);
 
   // Cluster zone alerts - track which clusters price is currently inside
   const inClusterRef = useRef<Set<string>>(new Set());
@@ -464,7 +495,7 @@ export default function NormalChartPage() {
           </div>
         </div>
 
-        <div className="w-[360px] space-y-4">
+        <div className="w-[360px] flex flex-col h-full gap-4">
           {/* Data Source Card */}
           <Card className="border-zinc-800 bg-zinc-950/40 backdrop-blur">
             <CardHeader className="pb-3">
@@ -500,6 +531,21 @@ export default function NormalChartPage() {
                       Sub
                     </Button>
                   )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {["NQ", "ES", "BTC-USD"].map((symbol) => (
+                    <Button
+                      key={symbol}
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setWsTicker(symbol);
+                        subscribeTicker(symbol);
+                      }}
+                    >
+                      {symbol}
+                    </Button>
+                  ))}
                 </div>
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-xs">
@@ -556,11 +602,17 @@ export default function NormalChartPage() {
                   variant="outline"
                   size="sm"
                   className="w-full"
-                  onClick={() => requestClusters(wsTicker)}
+                  onClick={() => {
+                    setClusterFetchStatus("loading");
+                    requestClusters(wsTicker);
+                  }}
                   disabled={connectionStatus !== "open"}
                 >
                   Get Clusters
                 </Button>
+                <div className={`text-xs ${clusterStatus.className}`}>
+                  {clusterStatus.text}
+                </div>
 
                 {/* Auto-fetch toggle - only show if we have clusters */}
                 {clusters && (
@@ -585,9 +637,16 @@ export default function NormalChartPage() {
             </CardContent>
           </Card>
 
-          {/* Clusters Display */}
-          <div className="flex-1 overflow-auto">
-            <ClustersDisplay ticker={wsTicker} data={clusters} />
+          <div className="flex-1 overflow-hidden">
+            <div className="h-full overflow-auto space-y-4 pr-1">
+              <AccountPanel
+                ticker={wsTicker}
+                currentPrice={currentPrice}
+                getCurrentPrice={getCurrentPrice}
+                subscribeTicker={subscribeTicker}
+                subscribedTickers={subscribedTickers}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -767,18 +826,18 @@ export function PriceChart({
 
     // --- candles ---
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: candleUpColor,
-      downColor: candleDownColor,
-      wickUpColor: candleUpColor,
-      wickDownColor: candleDownColor,
-      borderUpColor: candleBorderUp,
-      borderDownColor: candleBorderDown,
+      upColor: "#F5F7FA",
+      downColor: "#A0B4F3",
+      wickUpColor: "#F5F7FA",
+      wickDownColor: "#A0B4F3",
+      borderUpColor: "#F5F7FA",
+      borderDownColor: "#A0B4F3",
     });
     candleSeriesRef.current = candleSeries;
 
     // --- midpoint line: (high + low) / 2 for each bar ---
     const midpointSeries = chart.addSeries(LineSeries, {
-      color: lineColor,
+      color: "#A06BF3",
       lineWidth: 2,
       lineType: LineType.WithSteps,
     });
@@ -840,7 +899,12 @@ export function PriceChart({
     )
       return;
 
-    if (data.length === 0) return;
+    if (data.length === 0) {
+      candleSeriesRef.current.setData([]);
+      midpointSeriesRef.current.setData([]);
+      bgColorRef.current = null;
+      return;
+    }
 
     // Sort data by time and remove duplicates (required by TradingView charts)
     const getTimeValue = (time: string | number): number => {

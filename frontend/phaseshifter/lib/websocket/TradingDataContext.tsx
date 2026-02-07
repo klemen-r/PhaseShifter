@@ -81,6 +81,7 @@ export interface TradingDataContextValue {
 
   // Data access
   tickerData: Map<string, TickerData>;
+  clearTickerData: (ticker: string) => void;
   getCandles: (ticker: string) => WSCandle[];
   getClusters: (ticker: string) => ClustersData | null;
   getLastTick: (ticker: string) => WSTick | null;
@@ -159,7 +160,7 @@ export function TradingDataProvider({
   maxCandles = 800,
   pythonServerUrl = "ws://localhost:8001",
 }: TradingDataProviderProps) {
-  const { status, lastPingMs, send, subscribe, connect } = useWebSocket();
+  const { status, lastPingMs, send, subscribe } = useWebSocket();
 
   // Python server connection state
   const [pythonSocket, setPythonSocket] = useState<WebSocket | null>(null);
@@ -202,6 +203,8 @@ export function TradingDataProvider({
     };
 
     setPythonSocket(ws);
+    // The Python socket lifecycle is intentionally controlled here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pythonServerUrl]);
 
   // Send to Python server
@@ -383,6 +386,8 @@ export function TradingDataProvider({
       }
       pythonSocket?.close();
     };
+    // Cleanup intentionally closes the latest tracked socket.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectPython]);
 
   // Re-subscribe to desired tickers when Rust connection opens
@@ -746,7 +751,7 @@ export function TradingDataProvider({
     );
 
     return unsubscribe;
-  }, [subscribe, send]);
+  }, [subscribe, send, createDefaultTickerData]);
 
   const subscribeTicker = useCallback(
     (ticker: string) => {
@@ -756,7 +761,7 @@ export function TradingDataProvider({
       if (isSierraSymbol(ticker)) {
         // Sierra symbols (NQ, ES) -> Rust server
         if (status === "open") {
-          send({ type: "subscribe", ticker });
+          send({ type: "subscribe", symbol: ticker });
           // Request history if we don't have candles for this ticker yet
           const existing = tickerDataRef.current.get(ticker);
           if (!existing || existing.candles.length === 0) {
@@ -790,7 +795,7 @@ export function TradingDataProvider({
       if (isSierraSymbol(ticker)) {
         // Sierra symbols (NQ, ES) -> Rust server
         if (status === "open") {
-          send({ type: "unsubscribe", ticker });
+          send({ type: "unsubscribe", symbol: ticker });
         }
       } else {
         // Other symbols -> Python server
@@ -847,6 +852,21 @@ export function TradingDataProvider({
     },
     [tickerData],
   );
+
+  const clearTickerData = useCallback((ticker: string) => {
+    setTickerData((prev) => {
+      if (!prev.has(ticker)) return prev;
+      const next = new Map(prev);
+      next.delete(ticker);
+      return next;
+    });
+    setConfirmedTickers((prev) => {
+      if (!prev.has(ticker)) return prev;
+      const next = new Set(prev);
+      next.delete(ticker);
+      return next;
+    });
+  }, []);
 
   const getClusters = useCallback(
     (ticker: string): ClustersData | null => {
@@ -917,6 +937,7 @@ export function TradingDataProvider({
     disableAutoClusters,
     isAutoClustersEnabled: isAutoClustersEnabledFn,
     tickerData,
+    clearTickerData,
     getCandles,
     getClusters,
     getLastTick,

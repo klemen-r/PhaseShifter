@@ -358,7 +358,7 @@ PhaseShifter/
 |   |   |   |-- clusters.rs           # Node tracking + clustering
 |   |   |   |-- scid.rs               # SCID file reader (historical)
 |   |   |   |-- contracts.rs          # Auto contract detection
-|   |   |   '-- dtc/                  # DTC protocol (unused for CME)
+|   |   |   '-- dtc/                  # Legacy DTC protocol (disabled)
 |   |   '-- Cargo.toml
 |   |
 |   |-- phaseshifter-core/            # Rust phase engine library

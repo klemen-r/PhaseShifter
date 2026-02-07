@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
-use crate::dtc::Tick;
+use crate::tick::Tick;
 
 /// Supported timeframes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

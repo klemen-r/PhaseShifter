@@ -1,14 +1,15 @@
 # PhaseShifter Real-Time Streaming Server
 
-High-performance Rust server that connects to Sierra Chart via DTC protocol and streams real-time market data to the frontend via WebSocket.
+High-performance Rust server that listens to Sierra Chart via the ACSIL TCP study and streams real-time market data to the frontend via WebSocket.
 
 ## Features
 
-- **DTC Protocol Integration**: Connects to Sierra Chart's DTC server for real-time tick data
+- **ACSIL TCP Integration**: Receives real-time tick data from the PhaseShifterStream study
 - **Auto Contract Detection**: Automatically detects front-month futures contracts (NQ → NQH26, ES → ESH26, etc.)
 - **Multi-Timeframe Bar Building**: Constructs OHLCV bars for M1, M5, M15, H1 timeframes from tick data
 - **PhaseEngine Integration**: Real-time phase detection and node creation using the phaseshifter-core engine
 - **WebSocket Broadcasting**: Streams ticks, bars, phase updates, and nodes to connected clients
+- **Nanosecond Startup Timer**: Logs initialization time with nanosecond precision for performance monitoring
 
 ## Usage
 
@@ -16,15 +17,15 @@ High-performance Rust server that connects to Sierra Chart via DTC protocol and 
 # Build the server
 cargo build --release
 
-# Run with default settings (connects to Sierra Chart on localhost:11099, serves WebSocket on localhost:8000)
+# Run with default settings (ACSIL TCP on localhost:9000, serves WebSocket on localhost:8000)
 cargo run --release
 
 # Run with custom settings
 cargo run --release -- \
-  --dtc-host 127.0.0.1 \
-  --dtc-port 11099 \
   --ws-host 127.0.0.1 \
   --ws-port 8000 \
+  --sierra-tcp-port 9000 \
+  --sierra-data-folder "D:\\Trading\\Sierra\\Data" \
   --symbols NQ,ES \
   --log-level info
 ```
@@ -33,10 +34,10 @@ cargo run --release -- \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--dtc-host` | `127.0.0.1` | Sierra Chart DTC server host |
-| `--dtc-port` | `11099` | Sierra Chart DTC server port |
 | `--ws-host` | `127.0.0.1` | WebSocket server bind address |
 | `--ws-port` | `8000` | WebSocket server port |
+| `--sierra-tcp-port` | `9000` | ACSIL TCP port for live ticks |
+| `--sierra-data-folder` | `D:\Trading\Sierra\Data` | SCID file location |
 | `--symbols` | `NQ,ES` | Comma-separated base symbols (e.g., "NQ,ES,YM") |
 | `--log-level` | `info` | Log level: error, warn, info, debug, trace |
 
@@ -166,14 +167,14 @@ Clients can send the following messages to the server:
 ## Architecture
 
 ```
-Sierra Chart (DTC) → DTC Client → BarBuilder → PhaseEngine
+Sierra Chart (ACSIL TCP) → Sierra TCP Server → BarBuilder → PhaseEngine
                                       ↓            ↓
                                   WebSocket Server
                                       ↓
                                 Frontend Clients
 ```
 
-1. **DTC Client**: Connects to Sierra Chart, handles connection lifecycle, subscribes to market data
+1. **Sierra TCP Server**: Receives ticks from the ACSIL study over TCP
 2. **BarBuilder**: Constructs multi-timeframe OHLCV bars from tick data
 3. **PhaseEngine**: Processes closed bars to detect phase shifts and create nodes
 4. **WebSocket Server**: Broadcasts all events to connected clients with subscription filtering

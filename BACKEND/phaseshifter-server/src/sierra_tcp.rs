@@ -1,7 +1,6 @@
 //! Sierra Chart TCP Listener
 //!
 //! Receives tick data from ACSIL study via TCP socket.
-//! This bypasses DTC protocol restrictions for CME data.
 
 use std::collections::HashMap;
 use std::sync::Arc;

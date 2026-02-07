@@ -25,3 +25,34 @@ model ChartSettings {
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 }
+
+model Account {
+    id        String   @id @default(cuid())
+    name      String   @unique
+    balance   Float
+    leverage  Float    @default(1)
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+    trades    Trade[]
+}
+
+model Trade {
+    id         String     @id @default(cuid())
+    accountId  String
+    symbol     String
+    side       TradeSide
+    qty        Float
+    leverage   Float
+    entryPrice Float
+    exitPrice  Float?
+    openedAt   DateTime   @default(now())
+    closedAt   DateTime?
+    account    Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    @@index([accountId, openedAt])
+}
+
+enum TradeSide {
+    LONG
+    SHORT
+}

@@ -1,26 +1,25 @@
 //! PhaseShifter Real-Time Streaming Server
 //!
-//! Connects to Sierra Chart via DTC protocol and streams real-time market data
-//! to frontend clients via WebSocket.
+//! Streams real-time market data to frontend clients via WebSocket.
 //!
-//! Also accepts direct TCP connections from ACSIL studies for live CME data
-//! (bypasses DTC protocol restrictions).
+//! Accepts direct TCP connections from ACSIL studies for live CME data.
 //!
 //! Usage:
-//!     phaseshifter-server --dtc-host 127.0.0.1 --dtc-port 11099 --ws-port 8000
+//!     phaseshifter-server --ws-port 8000
 
 use anyhow::Result;
 use clap::Parser;
+use std::time::Instant;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod bar_builder;
 mod clusters;
 mod contracts;
-mod dtc;
 mod scid;
 mod server;
 mod sierra_tcp;
+mod tick;
 
 use server::Server;
 
@@ -31,14 +30,6 @@ use server::Server;
     about = "Real-time streaming server for PhaseShifter"
 )]
 struct Args {
-    /// DTC server host (Sierra Chart)
-    #[arg(long, default_value = "127.0.0.1")]
-    dtc_host: String,
-
-    /// DTC server port
-    #[arg(long, default_value = "11099")]
-    dtc_port: u16,
-
     /// WebSocket server port for frontend connections
     #[arg(long, default_value = "8000")]
     ws_port: u16,
@@ -52,7 +43,10 @@ struct Args {
     symbols: String,
 
     /// Sierra Chart data folder (for loading historical SCID files)
-    #[arg(long, default_value = "D:\\Trading\\Sierra\\Data")]
+    #[arg(
+        long,
+        default_value = "/Users/urban/.wine-sierra/drive_c/SierraChart/Data"
+    )]
     sierra_data_folder: String,
 
     /// Sierra TCP port for ACSIL study connections (live tick data)
@@ -66,6 +60,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let start = Instant::now();
     let args = Args::parse();
 
     // Initialize logging
@@ -80,10 +75,6 @@ async fn main() -> Result<()> {
     info!("╔════════════════════════════════════════════════════════════╗");
     info!("║          PhaseShifter Real-Time Streaming Server           ║");
     info!("╠════════════════════════════════════════════════════════════╣");
-    info!(
-        "║  DTC Server:   {}:{}                          ║",
-        args.dtc_host, args.dtc_port
-    );
     info!(
         "║  Sierra TCP:   127.0.0.1:{}  (ACSIL live data)            ║",
         args.sierra_tcp_port
@@ -103,10 +94,16 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
+    let elapsed = start.elapsed();
+    info!(
+        "⏱ Startup init: {}.{:09}s ({} ns)",
+        elapsed.as_secs(),
+        elapsed.subsec_nanos(),
+        elapsed.as_nanos()
+    );
+
     // Create and run server
     let server = Server::new(
-        &args.dtc_host,
-        args.dtc_port,
         &args.ws_host,
         args.ws_port,
         symbols,

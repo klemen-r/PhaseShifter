@@ -39,7 +39,6 @@ export function NewPath({ open, onOpenChange, onCreated }: NewPathProps) {
       onOpenChange(false);
       onCreated?.();
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error(err);
     } finally {
       setSubmitting(false);
@@ -52,7 +51,9 @@ export function NewPath({ open, onOpenChange, onCreated }: NewPathProps) {
         <DialogHeader>
           <DialogTitle>Add a New Path</DialogTitle>
         </DialogHeader>
-        <DialogDescription>Enter a path segment, e.g. "about".</DialogDescription>
+        <DialogDescription>
+          Enter a path segment, e.g. &quot;about&quot;.
+        </DialogDescription>
         <form onSubmit={handleSubmit} className="mt-2 space-y-3">
           <Input
             value={value}

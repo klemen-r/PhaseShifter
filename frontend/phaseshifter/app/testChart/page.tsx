@@ -12,7 +12,6 @@ import { useSidebar } from "@/components/ui/sidebar";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useTradingData,
   type WSCandle,
@@ -24,8 +23,6 @@ import {
   createChart,
   IChartApi,
   CandlestickSeries,
-  LineSeries,
-  LineType,
   ColorType,
 } from "lightweight-charts";
 import {
@@ -127,9 +124,11 @@ export default function TestChartPage() {
 
   // Sample data state
   const [sampleCandles] = useState(() => generateSampleCandles(200));
-  const [sampleClusters, setSampleClusters] = useState<ClustersData | null>(
-    null,
-  );
+  const sampleClusters = useMemo<ClustersData | null>(() => {
+    if (sampleCandles.length === 0) return null;
+    const lastPrice = sampleCandles[sampleCandles.length - 1].close;
+    return generateSampleClusters(lastPrice);
+  }, [sampleCandles]);
 
   // WebSocket data
   const {
@@ -140,38 +139,28 @@ export default function TestChartPage() {
     getCandles,
     getClusters,
     requestClusters,
-    connectedSymbols,
   } = useTradingData();
-
-  // Initialize sample clusters based on candle data
-  useEffect(() => {
-    if (sampleCandles.length > 0) {
-      const lastPrice = sampleCandles[sampleCandles.length - 1].close;
-      setSampleClusters(generateSampleClusters(lastPrice));
-    }
-  }, [sampleCandles]);
-
-  // Auto-select first connected symbol when server connects
-  useEffect(() => {
-    if (connectedSymbols.length > 0 && !connectedSymbols.includes(wsTicker)) {
-      setWsTicker(connectedSymbols[0]);
-    }
-  }, [connectedSymbols, wsTicker]);
 
   // Get data based on source
   const candles = useMemo(() => {
     if (dataSource === "sample") {
       return sampleCandles;
     }
+    if (!subscribedTickers.has(wsTicker)) {
+      return [];
+    }
     return getCandles(wsTicker);
-  }, [dataSource, sampleCandles, getCandles, wsTicker]);
+  }, [dataSource, sampleCandles, getCandles, wsTicker, subscribedTickers]);
 
   const clusters = useMemo(() => {
     if (dataSource === "sample") {
       return sampleClusters;
     }
+    if (!subscribedTickers.has(wsTicker)) {
+      return null;
+    }
     return getClusters(wsTicker);
-  }, [dataSource, sampleClusters, getClusters, wsTicker]);
+  }, [dataSource, sampleClusters, getClusters, wsTicker, subscribedTickers]);
 
   // Subscribe to ticker when switching to WebSocket mode
   useEffect(() => {
@@ -482,7 +471,12 @@ function TestChart({
 
   // Update candle data
   useEffect(() => {
-    if (!candleSeriesRef.current || candles.length === 0) return;
+    if (!candleSeriesRef.current) return;
+
+    if (candles.length === 0) {
+      candleSeriesRef.current.setData([]);
+      return;
+    }
 
     const chartCandles = toChartCandles(candles);
     candleSeriesRef.current.setData(chartCandles);

@@ -273,6 +273,7 @@ export function ExtraSettingsDialog({
     setLiveClusterOpacity(clusterOpacity);
   }, [clusterOpacity]);
 
+
   // Reset search when dialog closes
   useEffect(() => {
     if (!open) {

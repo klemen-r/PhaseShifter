@@ -2,7 +2,6 @@
 import { PrismaClient, Prisma } from "@prisma/client";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __prisma__: PrismaClient | undefined;
 }
 
@@ -76,7 +75,6 @@ export async function withRetry<T>(
   const backoff = (i: number) =>
     new Promise((r) => setTimeout(r, 100 * 2 ** i));
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       return await fn();

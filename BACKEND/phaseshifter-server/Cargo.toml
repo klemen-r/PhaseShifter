@@ -2,7 +2,7 @@
 name = "phaseshifter-server"
 version = "0.1.0"
 edition = "2021"
-description = "Real-time streaming server for PhaseShifter - connects to Sierra Chart via DTC protocol"
+description = "Real-time streaming server for PhaseShifter - connects to Sierra Chart via ACSIL TCP"
 
 [dependencies]
 # Core library

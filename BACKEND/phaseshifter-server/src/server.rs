@@ -1,14 +1,14 @@
 //! WebSocket Server
 //!
 //! High-performance WebSocket server that broadcasts real-time market data
-//! to connected frontend clients. Integrates DTC client, bar builder, and PhaseEngine.
+//! to connected frontend clients. Integrates the bar builder and PhaseEngine.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use phaseshifter_core::{Candle, EngineConfig, Phase, PhaseEngine, PhaseSide};
 use crate::bar_builder::{Bar, BarBuilder, BarEvent, Timeframe};
 use crate::clusters::{ClusterConfig, ClusterManager, ClustersData, ProjectionSide, TrackedNode};
 use crate::contracts::{to_sierra_symbol, to_sierra_symbol_with_exchange};
-use crate::dtc::{DtcClient, DtcClientConfig, Tick};
+use crate::tick::Tick;
 use crate::scid::ScidReader;
 use crate::sierra_tcp::{SierraTcpConfig, SierraTcpServer, SymbolRegistry};
 
@@ -183,8 +183,6 @@ struct EngineState {
 
 /// Main server struct
 pub struct Server {
-    dtc_host: String,
-    dtc_port: u16,
     ws_host: String,
     ws_port: u16,
     symbols: Vec<String>,
@@ -194,8 +192,6 @@ pub struct Server {
 
 impl Server {
     pub fn new(
-        dtc_host: &str,
-        dtc_port: u16,
         ws_host: &str,
         ws_port: u16,
         symbols: Vec<String>,
@@ -203,8 +199,6 @@ impl Server {
         sierra_tcp_port: u16,
     ) -> Self {
         Self {
-            dtc_host: dtc_host.to_string(),
-            dtc_port,
             ws_host: ws_host.to_string(),
             ws_port,
             symbols,
@@ -276,43 +270,9 @@ impl Server {
         let cluster_manager: Arc<RwLock<ClusterManager>> =
             Arc::new(RwLock::new(ClusterManager::new(ClusterConfig::default())));
 
-        // Start DTC client
-        let dtc_config = DtcClientConfig {
-            host: self.dtc_host.clone(),
-            port: self.dtc_port,
-            client_name: "PhaseShifter".to_string(),
-            ..Default::default()
-        };
-        let mut dtc_client = DtcClient::new(dtc_config);
-
         // Convert symbols to Sierra format (without exchange suffix for internal use)
         let sierra_symbols: Vec<String> =
             self.symbols.iter().map(|s| to_sierra_symbol(s)).collect();
-
-        // Convert symbols to full Sierra format with exchange (for DTC subscription)
-        // Note: CME data via DTC is blocked by Sierra Chart policy, but we format correctly anyway
-        let dtc_symbols: Vec<String> = self
-            .symbols
-            .iter()
-            .map(|s| to_sierra_symbol_with_exchange(s, "CME"))
-            .collect();
-
-        // Take tick receiver before connecting
-        let tick_rx = dtc_client
-            .take_tick_receiver()
-            .expect("tick receiver should be available");
-
-        // Take historical bar receiver before connecting
-        let hist_rx = dtc_client
-            .take_historical_bar_receiver()
-            .expect("historical bar receiver should be available");
-
-        // Register symbol subscriptions BEFORE connecting (they will be sent on logon)
-        // Using full symbol format with exchange suffix (e.g., NQH26-CME)
-        for symbol in &dtc_symbols {
-            dtc_client.subscribe(symbol).await?;
-            info!("Registered DTC symbol subscription: {}", symbol);
-        }
 
         // IMPORTANT: Spawn bar event processing task FIRST
         // This must be running before we load historical data so that
@@ -337,7 +297,7 @@ impl Server {
         // Small delay to ensure bar event processor is ready
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Load historical data from SCID files (bypasses CME DTC restrictions)
+        // Load historical data from SCID files on disk
         info!(
             "Loading historical data from SCID files in: {}",
             self.sierra_data_folder
@@ -358,16 +318,8 @@ impl Server {
             .await;
         });
 
-        // Connect to DTC server (subscriptions and historical requests will be sent on logon)
-        info!("Connecting to DTC server...");
-        dtc_client
-            .connect()
-            .await
-            .context("Failed to connect to DTC server")?;
-        info!("DTC connected successfully");
-
         // Set up Sierra TCP server for ACSIL live tick data
-        // This bypasses DTC restrictions for CME data
+        // This is the live tick path used in production
         let symbol_registry = Arc::new(RwLock::new(SymbolRegistry::new()));
 
         // Register all symbols in the registry so we can map symbol_id -> symbol name
@@ -434,35 +386,6 @@ impl Server {
         let listener = TcpListener::bind(&addr).await?;
         info!("WebSocket server listening on ws://{}", addr);
 
-        // Spawn historical bar processing task (from DTC, if any)
-        let bar_builder_hist = bar_builder.clone();
-        let sierra_symbols_hist = sierra_symbols.clone();
-        let symbols_for_hist = self.symbols.clone();
-        tokio::spawn(async move {
-            process_historical_bars(
-                hist_rx,
-                bar_builder_hist,
-                sierra_symbols_hist,
-                symbols_for_hist,
-            )
-            .await;
-        });
-
-        // Spawn tick processing task
-        let bar_builder_tick = bar_builder.clone();
-        let broadcast_tx_tick = broadcast_tx.clone();
-        let symbols_for_tick = self.symbols.clone();
-        tokio::spawn(async move {
-            process_ticks(
-                tick_rx,
-                bar_builder_tick,
-                broadcast_tx_tick,
-                sierra_symbols,
-                symbols_for_tick,
-            )
-            .await;
-        });
-
         // Accept WebSocket connections
         loop {
             match listener.accept().await {
@@ -500,49 +423,6 @@ impl Server {
             }
         }
     }
-}
-
-/// Process incoming ticks from DTC
-async fn process_ticks(
-    mut tick_rx: mpsc::Receiver<Tick>,
-    bar_builder: Arc<RwLock<BarBuilder>>,
-    broadcast_tx: broadcast::Sender<WsOutMessage>,
-    sierra_symbols: Vec<String>,
-    base_symbols: Vec<String>,
-) {
-    // Map Sierra symbols back to base symbols
-    let symbol_map: HashMap<String, String> = sierra_symbols
-        .into_iter()
-        .zip(base_symbols.into_iter())
-        .collect();
-
-    while let Some(tick) = tick_rx.recv().await {
-        // Map Sierra symbol to base symbol
-        let base_symbol = symbol_map
-            .get(&tick.symbol)
-            .cloned()
-            .unwrap_or_else(|| tick.symbol.clone());
-
-        // Broadcast tick to WebSocket clients
-        let tick_msg = WsOutMessage::Tick {
-            symbol: base_symbol.clone(),
-            price: tick.price,
-            volume: tick.volume,
-            timestamp: (tick.timestamp * 1000.0) as i64,
-            bid: tick.bid_price,
-            ask: tick.ask_price,
-        };
-        let _ = broadcast_tx.send(tick_msg);
-
-        // Update bar builder with remapped symbol
-        let mut remapped_tick = tick.clone();
-        remapped_tick.symbol = base_symbol;
-
-        let mut builder = bar_builder.write().await;
-        builder.on_tick(&remapped_tick).await;
-    }
-
-    warn!("Tick receiver closed");
 }
 
 /// Process incoming ticks from Sierra TCP (ACSIL study)
@@ -596,7 +476,7 @@ async fn process_sierra_ticks(
         };
         let _ = broadcast_tx.send(tick_msg);
 
-        // Convert to DTC Tick format for bar builder (use base symbol)
+        // Convert to normalized Tick format for bar builder (use base symbol)
         let dtc_tick = Tick {
             symbol: base_symbol.clone(),
             symbol_id: 0,
@@ -951,97 +831,6 @@ async fn load_historical_data_scid(
     // Set the shared live_mode flag so process_bar_events starts broadcasting
     live_mode.store(true, Ordering::Relaxed);
     info!("Live mode enabled - bar events will now be broadcast to clients");
-}
-
-/// Process historical bars from DTC and inject as synthetic ticks
-async fn process_historical_bars(
-    mut hist_rx: mpsc::Receiver<crate::dtc::HistoricalBar>,
-    bar_builder: Arc<RwLock<BarBuilder>>,
-    sierra_symbols: Vec<String>,
-    base_symbols: Vec<String>,
-) {
-    // Map Sierra symbols back to base symbols
-    let symbol_map: HashMap<String, String> = sierra_symbols
-        .into_iter()
-        .zip(base_symbols.into_iter())
-        .collect();
-
-    let mut bar_count = 0;
-    let mut completed_requests = std::collections::HashSet::new();
-
-    while let Some(hist_bar) = hist_rx.recv().await {
-        // Map Sierra symbol to base symbol
-        let base_symbol = symbol_map
-            .get(&hist_bar.symbol)
-            .cloned()
-            .unwrap_or_else(|| hist_bar.symbol.clone());
-
-        // Convert historical bar to synthetic ticks
-        // We'll create 4 ticks per bar: open, high, low, close
-        let timestamp = hist_bar.start_date_time;
-
-        let ticks = vec![
-            Tick {
-                symbol: base_symbol.clone(),
-                symbol_id: 0,
-                price: hist_bar.open,
-                volume: hist_bar.volume / 4.0,
-                timestamp,
-                at_bid_or_ask: 0,
-                bid_price: hist_bar.open,
-                ask_price: hist_bar.open,
-            },
-            Tick {
-                symbol: base_symbol.clone(),
-                symbol_id: 0,
-                price: hist_bar.high,
-                volume: hist_bar.volume / 4.0,
-                timestamp: timestamp + 15.0,
-                at_bid_or_ask: 0,
-                bid_price: hist_bar.high,
-                ask_price: hist_bar.high,
-            },
-            Tick {
-                symbol: base_symbol.clone(),
-                symbol_id: 0,
-                price: hist_bar.low,
-                volume: hist_bar.volume / 4.0,
-                timestamp: timestamp + 30.0,
-                at_bid_or_ask: 0,
-                bid_price: hist_bar.low,
-                ask_price: hist_bar.low,
-            },
-            Tick {
-                symbol: base_symbol.clone(),
-                symbol_id: 0,
-                price: hist_bar.close,
-                volume: hist_bar.volume / 4.0,
-                timestamp: timestamp + 45.0,
-                at_bid_or_ask: 0,
-                bid_price: hist_bar.close,
-                ask_price: hist_bar.close,
-            },
-        ];
-
-        // Feed ticks to bar builder
-        let mut builder = bar_builder.write().await;
-        for tick in ticks {
-            builder.on_tick(&tick).await;
-        }
-        drop(builder);
-
-        bar_count += 1;
-
-        if hist_bar.is_final && !completed_requests.contains(&hist_bar.request_id) {
-            completed_requests.insert(hist_bar.request_id);
-            info!(
-                "Completed loading {} historical bars for symbol={}, request_id={}",
-                bar_count, base_symbol, hist_bar.request_id
-            );
-        }
-    }
-
-    warn!("Historical bar receiver closed");
 }
 
 /// Process bar events from the bar builder

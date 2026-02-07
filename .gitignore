@@ -4,6 +4,7 @@
 /BACKEND/phaseshifter-core/target/
 /BACKEND/phaseshifter-server/target/
 /target/
+**/target/
 /*.rs.bk
 
 ########################
